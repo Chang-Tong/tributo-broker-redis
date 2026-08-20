@@ -311,6 +311,9 @@ def test_main_preserves_real_exception_for_terminal_mapping(
     if str(error) == "Ray wrapper":
         error.__cause__ = ModelExportError("nested export failed")
     redis_client = MagicMock()
+    redis_client.eval.side_effect = lambda script, _keys, *args: (
+        args[1] if "STAGE_TERMINAL_CANDIDATE" in script else ["published", "1-0"]
+    )
     with (
         patch(
             "tributo_broker_redis.run_training.create_redis_client",
@@ -323,7 +326,7 @@ def test_main_preserves_real_exception_for_terminal_mapping(
     ):
         assert main() == 1
 
-    event = json.loads(redis_client.xadd.call_args.args[1]["payload"])
+    event = json.loads(redis_client.eval.call_args.args[4])
     assert event["error_code"] == expected_code
     assert event["phase"] == expected_phase
     assert event["error_message"] == expected_message

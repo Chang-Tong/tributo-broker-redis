@@ -10,6 +10,7 @@ from redis.exceptions import ResponseError
 from tributo.integrations.broker import Message, TaskConsumer
 
 from tributo_broker_redis.config import RedisBrokerConfig
+from tributo_broker_redis.protocol import validate_job_id
 from tributo_broker_redis.redis_client import create_redis_client
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,13 @@ class RedisTaskConsumer(TaskConsumer):
         decoded = {str(_decode(key)): _decode(value) for key, value in values.items()}
         raw_job_id = decoded.get("job_id")
         job_id = raw_job_id if isinstance(raw_job_id, str) and raw_job_id else None
+        job_id_error: str | None = None
+        if job_id is not None:
+            try:
+                job_id = validate_job_id(job_id)
+            except ValueError as exc:
+                job_id = None
+                job_id_error = str(exc)
         payload = decoded.get("payload")
         delivery = str(_decode(delivery_id))
         payload_error: str | None = None
@@ -84,6 +92,7 @@ class RedisTaskConsumer(TaskConsumer):
             metadata={
                 "stream": self._config.task_stream_key,
                 "payload_error": payload_error,
+                "job_id_error": job_id_error,
             },
             delivery_id=delivery,
             delivery_attempt=attempt,

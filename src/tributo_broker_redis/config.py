@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tributo_broker_redis.protocol import MIN_TERMINAL_EVENT_BYTES
+
 
 class RedisBrokerConfig(BaseModel):
     """Standalone, Sentinel, and Cluster Redis connection settings."""
@@ -35,6 +37,8 @@ class RedisBrokerConfig(BaseModel):
     event_stream_prefix: str = "knova:training:events"
     invalid_event_stream_key: str = "knova:training:events:invalid"
     cancel_key_prefix: str = "knova:training:cancel"
+    active_job_key_prefix: str = "knova:training:active"
+    terminal_candidate_key_prefix: str = "knova:training:terminal-candidate"
     consumer_group: str = "tributo"
     consumer_name: str = Field(default_factory=lambda: _default_consumer_name())
     group_start_id: str = "$"
@@ -43,10 +47,17 @@ class RedisBrokerConfig(BaseModel):
     claim_count: int = Field(default=10, ge=1, le=1000)
     max_stream_length: int = Field(default=1000, ge=1)
     max_payload_bytes: int = Field(default=1024 * 1024, ge=1)
-    max_event_bytes: int = Field(default=1024 * 1024, ge=1)
+    max_event_bytes: int = Field(
+        default=1024 * 1024,
+        ge=MIN_TERMINAL_EVENT_BYTES,
+    )
     max_publish_retries: int = Field(default=3, ge=0, le=10)
     publish_retry_delay: float = Field(default=0.2, ge=0, le=30)
     failure_log_interval: float = Field(default=5.0, ge=0, le=300)
+    active_job_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=60)
+    terminal_candidate_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=60)
+    supervisor_interval_seconds: float = Field(default=2.0, ge=0, le=300)
+    supervisor_scan_count: int = Field(default=100, ge=1, le=10000)
     ray_dashboard_url: str = "http://127.0.0.1:8265"
     worker_password_env: str | None = None
     extra_py_modules: list[str] = Field(default_factory=list)
@@ -93,6 +104,12 @@ class RedisBrokerConfig(BaseModel):
 
     def cancel_key(self, job_id: str) -> str:
         return f"{self.cancel_key_prefix}:{job_id}"
+
+    def active_job_key(self, job_id: str) -> str:
+        return f"{self.active_job_key_prefix}:{{{job_id}}}"
+
+    def terminal_candidate_key(self, job_id: str) -> str:
+        return f"{self.terminal_candidate_key_prefix}:{{{job_id}}}"
 
 
 def _default_consumer_name() -> str:

@@ -17,7 +17,11 @@ from tributo_broker_redis.completion import (
     build_failed_payload,
     failure_phase,
 )
-from tributo_broker_redis.protocol import TrainingJobRequest
+from tributo_broker_redis.protocol import (
+    MAX_TERMINAL_DURATION_SECONDS,
+    TrainingJobRequest,
+    quantize_duration_seconds,
+)
 
 
 def _request() -> TrainingJobRequest:
@@ -335,6 +339,31 @@ def test_failed_and_cancelled_payloads_are_controlled_and_redacted() -> None:
     }
     assert failure_phase(TrainingDataError("bad split")) == "DATA_SPLITTING"
     assert failure_phase(ModelExportError("bad onnx")) == "EVALUATING"
+
+
+def test_terminal_duration_is_nonnegative_finite_and_millisecond_quantized() -> None:
+    assert quantize_duration_seconds(1.23456) == 1.235
+    assert (
+        build_cancelled_payload(
+            phase="TRAINING",
+            duration_seconds=1.23456,
+            has_best_model=False,
+        )["duration_seconds"]
+        == 1.235
+    )
+    for value in (
+        -0.001,
+        float("nan"),
+        float("inf"),
+        MAX_TERMINAL_DURATION_SECONDS + 1,
+        True,
+    ):
+        with pytest.raises(ValueError, match="finite non-negative"):
+            build_failed_payload(
+                "failure",
+                phase="TRAINING",
+                duration_seconds=value,
+            )
 
 
 @pytest.mark.parametrize(

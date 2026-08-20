@@ -37,6 +37,8 @@ class RedisBrokerPlugin(BrokerPlugin):
             "task-consumer",
             "consumer-group",
             "pending-recovery",
+            "active-job-supervisor",
+            "atomic-terminal-guard",
             "event-reporter",
             "cancellation-checker",
             "standalone",

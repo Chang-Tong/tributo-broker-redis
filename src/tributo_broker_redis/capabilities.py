@@ -540,11 +540,6 @@ def validate_supported_capabilities(request: TrainingJobRequest) -> None:
         _unsupported("tuning.mode", "AUTO tuning is not implemented")
     if request.tuning.auto_config is not None:
         _unsupported("tuning.auto_config", "AUTO tuning is not implemented")
-    if request.resource_limits.max_training_time_seconds is not None:
-        _unsupported(
-            "resource_limits.max_training_time_seconds",
-            "training watchdog timeout is not implemented",
-        )
     hyper_params = request.algorithm.hyper_params
     configured_rounds = hyper_params.get("num_rounds", hyper_params.get("n_estimators"))
     num_rounds = hyper_params.get("num_rounds")

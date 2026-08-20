@@ -8,7 +8,10 @@ from collections.abc import Mapping, Sequence, Set
 from datetime import UTC, datetime
 from typing import Any
 
-from tributo_broker_redis.protocol import TrainingJobRequest
+from tributo_broker_redis.protocol import (
+    TrainingJobRequest,
+    quantize_duration_seconds,
+)
 
 _ERROR_CODES = {
     "ValueError": "INVALID_PAYLOAD",
@@ -467,7 +470,7 @@ def build_completed_payload(
     payload: dict[str, Any] = {
         "phase": "COMPLETED",
         "progress_percent": 100,
-        "duration_seconds": finite_float(duration_seconds, "duration_seconds"),
+        "duration_seconds": quantize_duration_seconds(duration_seconds),
         "result_summary": {
             "primary_metric": (
                 {
@@ -527,7 +530,7 @@ def build_failed_payload(
             error_code if error_code in _PROTOCOL_CODES else name
         ),
         "error_message": redact_sensitive(str(controlled)),
-        "duration_seconds": finite_float(duration_seconds, "duration_seconds"),
+        "duration_seconds": quantize_duration_seconds(duration_seconds),
     }
 
 
@@ -536,6 +539,6 @@ def build_cancelled_payload(
 ) -> dict[str, Any]:
     return {
         "phase": phase,
-        "duration_seconds": finite_float(duration_seconds, "duration_seconds"),
+        "duration_seconds": quantize_duration_seconds(duration_seconds),
         "has_best_model": bool(has_best_model),
     }

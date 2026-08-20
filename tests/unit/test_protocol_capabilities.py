@@ -640,6 +640,13 @@ def test_invalid_file_format_fails_before_ray_submission() -> None:
         validate_supported_capabilities(TrainingJobRequest.model_validate(value))
 
 
+def test_supervised_training_timeout_is_supported() -> None:
+    value = _canonical()
+    value["resource_limits"] = {"max_training_time_seconds": 300}
+
+    validate_supported_capabilities(TrainingJobRequest.model_validate(value))
+
+
 @pytest.mark.parametrize(
     ("sampling", "path"),
     [
@@ -672,6 +679,9 @@ def test_runtime_capability_gate_fails_before_ray_submission() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig()
     runtime._redis = MagicMock()
+    runtime._redis.eval.side_effect = lambda script, _keys, *args: (
+        args[1] if "STAGE_TERMINAL_CANDIDATE" in script else ["published", "1-0"]
+    )
     runtime._consumer = MagicMock()
 
     with patch(
@@ -683,7 +693,7 @@ def test_runtime_capability_gate_fails_before_ray_submission() -> None:
 
     assert outcome.disposition == TaskDisposition.ACK
     submit.assert_not_called()
-    event = json.loads(runtime._redis.xadd.call_args.args[1]["payload"])
+    event = json.loads(runtime._redis.eval.call_args.args[4])
     assert event["error_code"] == "INVALID_PAYLOAD"
     assert event["phase"] == "QUEUED"
     assert "datasource.type" in event["error_message"]

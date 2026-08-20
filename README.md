@@ -37,12 +37,18 @@ provider validates all fields.
   "task_stream_key": "knova:training:tasks",
   "event_stream_prefix": "knova:training:events",
   "invalid_event_stream_key": "knova:training:events:invalid",
+  "active_job_key_prefix": "knova:training:active",
+  "terminal_candidate_key_prefix": "knova:training:terminal-candidate",
   "consumer_group": "tributo",
   "group_start_id": "$",
   "claim_idle_ms": 60000,
   "claim_count": 10,
   "max_payload_bytes": 1048576,
   "max_event_bytes": 1048576,
+  "active_job_ttl_seconds": 604800,
+  "terminal_candidate_ttl_seconds": 604800,
+  "supervisor_interval_seconds": 2.0,
+  "supervisor_scan_count": 100,
   "allow_legacy_training_config": false,
   "ray_dashboard_url": "http://ray-head:8265",
   "runtime_pip_packages": ["/provider/tributo_broker_redis-<version>-py3-none-any.whl"]
@@ -60,6 +66,22 @@ databases are not supported by Redis Cluster.
 The default `consumer_name` is generated from host, process, and a random
 suffix. Set it explicitly only when a stable Redis consumer identity is
 required for an operational reason.
+
+Accepted Ray jobs are registered under `active_job_key_prefix`. Terminal
+events are first persisted under `terminal_candidate_key_prefix`, then
+atomically appended to the per-job event stream. The supervisor scans those
+records to reconcile cancellation, timeout, restart, and missing-terminal
+failures; keep both TTL values longer than the maximum expected job lifetime.
+`job_id` is a shared routing identity and is limited to 128 ASCII letters,
+digits, `.`, `_`, `:`, and `-` (starting with a letter or digit). This bound is
+enforced at the Redis envelope, canonical request, and Ray worker reporter
+boundaries. Terminal `duration_seconds` values are finite, non-negative,
+rounded to milliseconds, and bounded by the supported 14-digit Unix
+millisecond timestamp horizon. `max_event_bytes` cannot be configured below
+373 bytes: that value is calculated from the larger of the real minimal
+`FAILED` and `CANCELLED` terminal schemas at the maximum job ID and bounded
+duration encoding, so an oversized completion can always be replaced by a
+durable `PAYLOAD_TOO_LARGE` failure.
 
 ## Commands
 

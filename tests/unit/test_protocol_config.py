@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -12,11 +13,64 @@ from redis.cluster import ClusterNode
 
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.protocol import (
+    MAX_JOB_ID_LENGTH,
+    MAX_TERMINAL_DURATION_SECONDS,
+    MIN_TERMINAL_EVENT_BYTES,
     TrainingJobRequest,
     check_protocol_version,
+    event_payload,
     is_training_task,
+    quantize_duration_seconds,
 )
 from tributo_broker_redis.redis_client import create_redis_client
+
+
+def test_event_size_limit_cannot_disable_emergency_terminal() -> None:
+    with pytest.raises(
+        ValueError, match=f"greater than or equal to {MIN_TERMINAL_EVENT_BYTES}"
+    ):
+        RedisBrokerConfig(max_event_bytes=MIN_TERMINAL_EVENT_BYTES - 1)
+
+
+def test_job_id_limit_is_shared_by_protocol_and_terminal_budget() -> None:
+    maximum = "j" * MAX_JOB_ID_LENGTH
+    TrainingJobRequest(job_id=maximum, training_config={"data": {}})
+    with pytest.raises(ValidationError, match="job_id"):
+        TrainingJobRequest(job_id=f"{maximum}j", training_config={"data": {}})
+    with pytest.raises(ValidationError, match="job_id"):
+        TrainingJobRequest(job_id="unsafe/job", training_config={"data": {}})
+
+    failed = event_payload(
+        job_id=maximum,
+        event_type="FAILED",
+        payload={
+            "timestamp": 99_999_999_999_999,
+            "phase": "EVALUATING",
+            "error_code": "PAYLOAD_TOO_LARGE",
+            "error_message": "COMPLETED event exceeded the configured size limit",
+            "duration_seconds": quantize_duration_seconds(
+                MAX_TERMINAL_DURATION_SECONDS
+            ),
+        },
+    )
+    cancelled = event_payload(
+        job_id=maximum,
+        event_type="CANCELLED",
+        payload={
+            "timestamp": 99_999_999_999_999,
+            "phase": "EVALUATING",
+            "duration_seconds": quantize_duration_seconds(
+                MAX_TERMINAL_DURATION_SECONDS
+            ),
+            "has_best_model": False,
+        },
+    )
+    encoded_sizes = [
+        len(json.dumps(event, separators=(",", ":")).encode("utf-8"))
+        for event in (failed, cancelled)
+    ]
+    assert max(encoded_sizes) == MIN_TERMINAL_EVENT_BYTES
+    assert RedisBrokerConfig(max_event_bytes=MIN_TERMINAL_EVENT_BYTES)
 
 
 def test_protocol_version_and_training_scope() -> None:
@@ -298,7 +352,7 @@ def test_redis_config_supports_modes_and_rejects_missing_topology() -> None:
 def test_provider_limits_and_worker_specific_secret_reference() -> None:
     config = RedisBrokerConfig(
         max_payload_bytes=128,
-        max_event_bytes=256,
+        max_event_bytes=512,
         claim_count=25,
         worker_password_env="WORKER_REDIS_PASSWORD",
         extra_py_modules=["/provider/tributo_broker_redis"],

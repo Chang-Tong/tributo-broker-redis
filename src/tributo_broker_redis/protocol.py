@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from typing import Any
 
 from pydantic import (
@@ -15,6 +17,119 @@ from pydantic import (
 )
 
 PROTOCOL_VERSION = "2.0"
+MAX_JOB_ID_LENGTH = 128
+_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+MAX_EVENT_TIMESTAMP = 99_999_999_999_999
+MAX_TERMINAL_DURATION_SECONDS = MAX_EVENT_TIMESTAMP / 1000
+
+
+def validate_job_id(value: str) -> str:
+    """Validate the shared Redis, protocol, worker, and Ray run identity."""
+    if (
+        not value
+        or len(value) > MAX_JOB_ID_LENGTH
+        or _JOB_ID_PATTERN.fullmatch(value) is None
+    ):
+        raise ValueError(
+            "job_id must be 1-128 ASCII letters, digits, '.', '_', ':', or '-' "
+            "and start with a letter or digit"
+        )
+    return value
+
+
+def quantize_duration_seconds(value: Any) -> float:
+    """Return a finite non-negative terminal duration rounded to milliseconds."""
+    if isinstance(value, bool):
+        raise ValueError("duration_seconds must be a finite non-negative number")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "duration_seconds must be a finite non-negative number"
+        ) from exc
+    if (
+        not math.isfinite(result)
+        or result < 0
+        or result > MAX_TERMINAL_DURATION_SECONDS
+    ):
+        raise ValueError("duration_seconds must be a finite non-negative number")
+    quantized = round(result, 3)
+    return 0.0 if quantized == 0 else quantized
+
+
+def validate_terminal_event(value: dict[str, Any], job_id: str) -> None:
+    """Validate the minimum durable wire schema shared with candidate Lua."""
+    if value.get("protocol_version") != PROTOCOL_VERSION:
+        raise ValueError("terminal candidate has an unsupported protocol_version")
+    if value.get("job_id") != job_id:
+        raise ValueError("terminal candidate job_id does not match its key")
+    validate_job_id(job_id)
+    timestamp = value.get("timestamp")
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, int)
+        or timestamp < 0
+        or timestamp > MAX_EVENT_TIMESTAMP
+    ):
+        raise ValueError(
+            f"terminal candidate timestamp must be an integer in "
+            f"[0, {MAX_EVENT_TIMESTAMP}]"
+        )
+    event_type = value.get("event_type")
+    if event_type not in {"COMPLETED", "FAILED", "CANCELLED"}:
+        raise ValueError("terminal candidate must contain a terminal event")
+    duration = value.get("duration_seconds")
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        raise ValueError("terminal candidate duration_seconds is invalid")
+    try:
+        quantize_duration_seconds(duration)
+    except ValueError as exc:
+        raise ValueError("terminal candidate duration_seconds is invalid") from exc
+    if event_type == "FAILED":
+        for field in ("phase", "error_code", "error_message"):
+            if not isinstance(value.get(field), str) or not value[field]:
+                raise ValueError(f"terminal candidate FAILED.{field} is required")
+    elif event_type == "CANCELLED":
+        if not isinstance(value.get("phase"), str) or not value["phase"]:
+            raise ValueError("terminal candidate CANCELLED.phase is required")
+        if not isinstance(value.get("has_best_model"), bool):
+            raise ValueError(
+                "terminal candidate CANCELLED.has_best_model must be boolean"
+            )
+    else:
+        for field in ("result_summary", "training_result", "artifact_manifest"):
+            if not isinstance(value.get(field), dict):
+                raise ValueError(f"terminal candidate COMPLETED.{field} is required")
+
+
+def _terminal_size_budget() -> int:
+    """Return the exact JSON bytes needed by the largest emergency terminal."""
+    common = {
+        "protocol_version": PROTOCOL_VERSION,
+        "job_id": "j" * MAX_JOB_ID_LENGTH,
+        # Reserve the full 14-digit millisecond timestamp range.
+        "timestamp": MAX_EVENT_TIMESTAMP,
+        "phase": "EVALUATING",
+        "duration_seconds": quantize_duration_seconds(MAX_TERMINAL_DURATION_SECONDS),
+    }
+    failed = {
+        **common,
+        "event_type": "FAILED",
+        "error_code": "PAYLOAD_TOO_LARGE",
+        "error_message": "COMPLETED event exceeded the configured size limit",
+    }
+    cancelled = {
+        **common,
+        "event_type": "CANCELLED",
+        "has_best_model": False,
+    }
+    return max(
+        len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+        for value in (failed, cancelled)
+    )
+
+
+MIN_TERMINAL_EVENT_BYTES = _terminal_size_budget()
 
 
 def check_protocol_version(value: dict[str, Any]) -> str | None:
@@ -288,7 +403,7 @@ class TrainingJobRequest(ProtocolModel):
     protocol_version: str = PROTOCOL_VERSION
     job_type: str = "TRAINING"
     task_type: str | None = None
-    job_id: str = Field(min_length=1)
+    job_id: str = Field(min_length=1, max_length=MAX_JOB_ID_LENGTH)
     model_id: str = ""
     version_id: str = ""
     tenant_id: str = ""
@@ -310,6 +425,11 @@ class TrainingJobRequest(ProtocolModel):
     storage_context: StorageContext | None = None
     extensions: dict[str, Any] = Field(default_factory=dict)
     training_config: dict[str, Any] | None = None
+
+    @field_validator("job_id")
+    @classmethod
+    def job_id_is_safe(cls, value: str) -> str:
+        return validate_job_id(value)
 
     @model_validator(mode="after")
     def validate_unique_features(self) -> TrainingJobRequest:

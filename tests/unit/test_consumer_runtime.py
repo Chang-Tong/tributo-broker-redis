@@ -14,7 +14,37 @@ from tributo.integrations.broker_runner import BrokerRunner, BrokerRunnerState
 from tributo_broker_redis.cancellation import RedisCancellationChecker
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.consumer import RedisTaskConsumer
+from tributo_broker_redis.protocol import MAX_JOB_ID_LENGTH
 from tributo_broker_redis.runtime import RedisBrokerRuntime
+
+
+def _runtime_redis() -> MagicMock:
+    client = MagicMock()
+    client.xadd.return_value = "1-0"
+    client.xrevrange.return_value = []
+    client.get.return_value = None
+    client.scan_iter.return_value = iter(())
+
+    def eval_script(script: str, _key_count: int, *args: object) -> object:
+        if "STAGE_TERMINAL_CANDIDATE" in script:
+            _key, encoded, _ttl, _job_id, _max_timestamp, _max_duration = args
+            return encoded
+        if "local incoming" in script:
+            key, encoded, ttl = args
+            client.set(key, encoded, ex=int(str(ttl)))
+            return json.loads(str(encoded))["current_phase"]
+        if "XADD" not in script:
+            return 0
+        stream_key, job_id, encoded, _event_type, _phase, max_length = args
+        event_id = client.xadd(
+            stream_key,
+            {"job_id": job_id, "payload": encoded},
+            maxlen=int(str(max_length)),
+        )
+        return ["published", event_id]
+
+    client.eval.side_effect = eval_script
+    return client
 
 
 def test_consumer_decodes_outer_job_id_and_acknowledges_delivery() -> None:
@@ -117,9 +147,28 @@ def test_consumer_does_not_synthesize_job_id_for_invalid_envelope() -> None:
     assert message.job_id is None
 
 
+def test_consumer_rejects_oversized_outer_job_id_before_runtime_routing() -> None:
+    client = MagicMock()
+    oversized = "j" * (MAX_JOB_ID_LENGTH + 1)
+    client.xreadgroup.return_value = [
+        ("tasks", [("7-0", {"job_id": oversized, "payload": "{}"})])
+    ]
+    consumer = RedisTaskConsumer.__new__(RedisTaskConsumer)
+    consumer._redis = client
+    consumer._config = RedisBrokerConfig()
+    consumer._pending_messages = []
+    consumer._delivery_attempts = {}
+
+    message = consumer.poll(10)
+
+    assert message is not None
+    assert message.job_id is None
+    assert "1-128 ASCII" in str(message.metadata["job_id_error"])
+
+
 def test_invalid_payload_is_acked_even_when_failed_event_cannot_publish() -> None:
     config = RedisBrokerConfig(max_publish_retries=0)
-    client = MagicMock()
+    client = _runtime_redis()
     client.xadd.side_effect = ConnectionError("redis down")
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = config
@@ -135,7 +184,7 @@ def test_invalid_payload_is_acked_even_when_failed_event_cannot_publish() -> Non
 def test_missing_job_id_is_failed_and_acked_on_dedicated_stream() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     result = runtime.handle(Message(None, {"raw": "{}"}, delivery_id="7-0"))
     assert result.disposition == TaskDisposition.ACK
@@ -144,13 +193,29 @@ def test_missing_job_id_is_failed_and_acked_on_dedicated_stream() -> None:
     assert json.loads(values["payload"])["job_id"] is None
 
 
+def test_oversized_outer_job_id_is_acked_on_dedicated_stream_without_echo() -> None:
+    runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
+    runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
+    runtime._redis = _runtime_redis()
+    runtime._consumer = MagicMock()
+    oversized = "j" * (MAX_JOB_ID_LENGTH + 1)
+
+    result = runtime.handle(Message(oversized, {"raw": "{}"}, delivery_id="7-0"))
+
+    assert result.disposition == TaskDisposition.ACK
+    stream, values = runtime._redis.xadd.call_args.args[:2]
+    assert stream == runtime.config.invalid_event_stream_key
+    assert json.loads(values["payload"])["job_id"] is None
+    assert oversized not in values["payload"]
+
+
 def test_runtime_passes_business_job_id_to_submission() -> None:
     config = RedisBrokerConfig(
         allow_legacy_training_config=True,
         extra_py_modules=["/provider/tributo_broker_redis"],
         worker_password_env="WORKER_REDIS_PASSWORD",
     )
-    client = MagicMock()
+    client = _runtime_redis()
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = config
     runtime._redis = client
@@ -198,7 +263,7 @@ def test_runtime_passes_business_job_id_to_submission() -> None:
 def test_runtime_rejects_legacy_training_config_without_explicit_opt_in() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig()
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
 
     with patch(
@@ -229,7 +294,7 @@ def test_runtime_rejects_legacy_training_config_without_explicit_opt_in() -> Non
 def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig()
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: False)
     with patch(
@@ -283,6 +348,9 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
                                 "validation_ratio": 0.5,
                                 "test_ratio": 0.0,
                             },
+                            "resource_limits": {
+                                "max_training_time_seconds": 60,
+                            },
                             "storage_context": {
                                 "type": "local",
                                 "prefix": "/tmp/ray_results/bundles/",
@@ -323,6 +391,8 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
         },
     }
     assert "password" not in json.dumps(execution_context).lower()
+    active_record = json.loads(runtime._redis.set.call_args.args[1])
+    assert active_record["deadline_at"] - active_record["submitted_at"] == 60
     phase_events = [
         json.loads(call.args[1]["payload"])
         for call in runtime._redis.xadd.call_args_list
@@ -334,7 +404,7 @@ def test_redelivery_reuses_same_ray_execution_attempt() -> None:
     config = RedisBrokerConfig(allow_legacy_training_config=True)
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = config
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: False)
     submissions = [
@@ -396,7 +466,7 @@ def test_redelivery_reuses_same_ray_execution_attempt() -> None:
 def test_pre_submission_cancellation_is_acked_without_ray_submission() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: True)
     with patch(
@@ -422,7 +492,7 @@ def test_pre_submission_cancellation_is_acked_without_ray_submission() -> None:
 def test_unsupported_task_type_is_failed_and_acked() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig()
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     result = runtime.handle(
         Message(
@@ -448,7 +518,7 @@ def test_unsupported_task_type_is_failed_and_acked() -> None:
 def test_oversized_payload_is_failed_and_acked() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig(max_payload_bytes=8)
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     result = runtime.handle(
         Message(
@@ -468,7 +538,7 @@ def test_temporary_ray_submission_failure_leaves_message_for_retry(
 ) -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
-    runtime._redis = MagicMock()
+    runtime._redis = _runtime_redis()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: False)
     with (

@@ -9,3 +9,10 @@
   cooperative cancellation support.
 - Fail-open Redis outage handling, bounded event publication retries, invalid
   message acknowledgement semantics, and lifecycle metrics replay.
+- Add restart-safe active-job supervision, atomic first-writer terminal
+  candidates, and Redis topology outage classification. Job IDs now have one
+  128-character ASCII contract across task, protocol, and worker boundaries;
+  the minimum event-size configuration is derived from the emergency terminal
+  schemas.
+- Validate staged terminal candidates against their complete minimum wire
+  schemas and quantize all terminal durations to millisecond precision.

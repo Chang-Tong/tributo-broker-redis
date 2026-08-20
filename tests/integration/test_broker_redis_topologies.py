@@ -13,6 +13,7 @@ import redis
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.redis_client import create_redis_client
+from tributo_broker_redis.reporter import RedisEventReporter
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -137,10 +138,13 @@ def test_cluster_handles_task_event_and_cancel_keys() -> None:
         consumer.ack(message)
 
         event_key = config.event_stream_key("cluster-job")
-        client.xadd(event_key, {"payload": '{"event_type":"PHASE"}'})
+        reporter = RedisEventReporter(client, config, "cluster-job")
+        reporter.report_phase("cluster-job", "QUEUED")
+        assert reporter.report_failed_with_code("cluster-job", "controlled failure")
+        assert reporter.report_cancelled("cluster-job")
         cancel_key = config.cancel_key("cluster-job")
         client.set(cancel_key, "1")
         assert client.exists(cancel_key) == 1
-        assert client.xlen(event_key) == 1
+        assert client.xlen(event_key) == 2
     finally:
         consumer.close()

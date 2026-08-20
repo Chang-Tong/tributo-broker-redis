@@ -17,9 +17,16 @@ from ray.job_submission import JobStatus, JobSubmissionClient
 from tributo.integrations.broker import CancellationSpec, Message, TaskDisposition
 from tributo.integrations.broker_runner import BrokerRunner, BrokerRunnerState
 
+from tributo_broker_redis.active_jobs import (
+    ActiveJobRecord,
+    ActiveJobStore,
+    TerminalCandidateStore,
+)
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.plugin import RedisBrokerPlugin
+from tributo_broker_redis.protocol import MAX_EVENT_TIMESTAMP
+from tributo_broker_redis.reporter import RedisEventReporter
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -77,6 +84,182 @@ def _events(client: redis.Redis, stream: str) -> list[dict[str, Any]]:
             payload = payload.decode()
         payloads.append(json.loads(payload))
     return payloads
+
+
+def _completed_terminal_payload() -> dict[str, Any]:
+    return {
+        "duration_seconds": 1.0,
+        "result_summary": {"status": "success"},
+        "training_result": {"algorithm_key": "xgboost"},
+        "artifact_manifest": {"model_id": "model-1"},
+    }
+
+
+def _encoded_terminal(
+    event_type: str,
+    job_id: str,
+    *,
+    timestamp: int = 1,
+) -> str:
+    payload: dict[str, Any] = {"timestamp": timestamp, "duration_seconds": 1.0}
+    if event_type == "COMPLETED":
+        payload.update(_completed_terminal_payload())
+    elif event_type == "FAILED":
+        payload.update(
+            {
+                "phase": "TRAINING",
+                "error_code": "TRAINING_FAILED",
+                "error_message": "controlled failure",
+            }
+        )
+    else:
+        payload.update({"phase": "TRAINING", "has_best_model": False})
+    return json.dumps(
+        {
+            "protocol_version": "2.0",
+            "event_type": event_type,
+            "job_id": job_id,
+            **payload,
+        },
+        separators=(",", ":"),
+    )
+
+
+def test_real_redis_lua_guard_enforces_global_terminal_and_phase_rules(
+    redis_client: redis.Redis,
+) -> None:
+    suffix = uuid.uuid4().hex
+    config = RedisBrokerConfig(
+        event_stream_prefix=f"it:guard:events:{suffix}",
+        max_publish_retries=0,
+    )
+    reporter_a = RedisEventReporter(redis_client, config, "guard-job")
+    reporter_b = RedisEventReporter(redis_client, config, "guard-job")
+
+    reporter_a.report_phase("guard-job", "QUEUED")
+    reporter_b.report_phase("guard-job", "QUEUED")
+    assert reporter_a.report_completed_payload(
+        "guard-job", _completed_terminal_payload()
+    )
+    assert reporter_b.report_failed_with_code("guard-job", "late failure")
+    reporter_b.report_log("guard-job", "late log")
+
+    events = _events(redis_client, config.event_stream_key("guard-job"))
+    assert [event["event_type"] for event in events] == ["PHASE", "COMPLETED"]
+
+
+def test_real_redis_lua_guard_ignores_scalar_poison_payload(
+    redis_client: redis.Redis,
+) -> None:
+    suffix = uuid.uuid4().hex
+    config = RedisBrokerConfig(
+        event_stream_prefix=f"it:guard-poison:events:{suffix}",
+        max_publish_retries=0,
+    )
+    stream = config.event_stream_key("guard-job")
+    redis_client.xadd(stream, {"job_id": "guard-job", "payload": "42"})
+
+    reporter = RedisEventReporter(redis_client, config, "guard-job")
+    reporter.report_phase("guard-job", "QUEUED")
+    assert reporter.report_failed_with_code("guard-job", "controlled")
+
+    events = _events(redis_client, stream)
+    assert events[0] == 42
+    assert [event["event_type"] for event in events[1:]] == ["PHASE", "FAILED"]
+
+
+def test_real_redis_active_registration_merges_early_worker_phase(
+    redis_client: redis.Redis,
+) -> None:
+    suffix = uuid.uuid4().hex
+    config = RedisBrokerConfig(
+        event_stream_prefix=f"it:phase-race:events:{suffix}",
+        active_job_key_prefix=f"it:phase-race:active:{suffix}",
+    )
+    reporter = RedisEventReporter(redis_client, config, "phase-job")
+    reporter.report_phase("phase-job", "LOADING_DATA")
+    store = ActiveJobStore(redis_client, config)
+    store.save(
+        ActiveJobRecord(
+            job_id="phase-job",
+            run_id="phase-job",
+            attempt_id="attempt-1",
+            submission_id="submission-1",
+            execution_id="ray-job-1",
+            submitted_at=time.time(),
+            deadline_at=None,
+            current_phase="QUEUED",
+            request_metadata={},
+            candidate_ref=config.terminal_candidate_key("phase-job"),
+        )
+    )
+
+    record = store.load("phase-job")
+    assert record is not None
+    assert record.current_phase == "LOADING_DATA"
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [int(time.time() * 1000), MAX_EVENT_TIMESTAMP],
+    ids=["current-epoch-ms", "maximum-timestamp"],
+)
+def test_real_redis_terminal_candidate_is_atomic_first_valid_writer_wins(
+    redis_client: redis.Redis,
+    timestamp: int,
+) -> None:
+    suffix = uuid.uuid4().hex
+    config = RedisBrokerConfig(
+        terminal_candidate_key_prefix=f"it:candidate:{suffix}",
+    )
+    store = TerminalCandidateStore(redis_client, config)
+    job_id = f"candidate-job-{timestamp}"
+    completed = _encoded_terminal("COMPLETED", job_id, timestamp=timestamp)
+    failed = _encoded_terminal("FAILED", job_id, timestamp=timestamp)
+
+    assert store.save(job_id, completed) == completed
+    assert store.save(job_id, failed) == completed
+    assert store.load(job_id) == completed
+    store.delete(job_id)
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [
+        {"protocol_version": "2.0", "event_type": "FAILED", "job_id": "poison"},
+        {
+            "protocol_version": "2.0",
+            "event_type": "CANCELLED",
+            "job_id": "poison",
+            "timestamp": 1,
+            "duration_seconds": "1.0",
+            "phase": "TRAINING",
+            "has_best_model": False,
+        },
+        {
+            "protocol_version": "1.0",
+            "event_type": "COMPLETED",
+            "job_id": "poison",
+            "timestamp": 1,
+            **_completed_terminal_payload(),
+        },
+    ],
+)
+def test_real_redis_invalid_candidate_is_replaced_by_complete_terminal(
+    redis_client: redis.Redis,
+    poison: dict[str, Any],
+) -> None:
+    suffix = uuid.uuid4().hex
+    config = RedisBrokerConfig(
+        terminal_candidate_key_prefix=f"it:candidate-poison:{suffix}",
+    )
+    store = TerminalCandidateStore(redis_client, config)
+    redis_client.set(config.terminal_candidate_key("poison"), json.dumps(poison))
+    failed = _encoded_terminal("FAILED", "poison")
+
+    assert store.save("poison", failed) == failed
+    assert store.load("poison") == failed
+    store.delete("poison")
 
 
 def _task_payload(
@@ -479,8 +662,9 @@ def test_real_canonical_v2_training_completes_with_bundle_and_identity(
             time.sleep(2)
 
         event_types = {event["event_type"] for event in events}
-        assert {"PHASE", "LOG", "METRICS", "COMPLETED"}.issubset(event_types), (
-            json.dumps(events, ensure_ascii=False)
+        expected_event_types = {"PHASE", "LOG", "METRICS", "COMPLETED"}
+        assert expected_event_types.issubset(event_types), json.dumps(
+            events, ensure_ascii=False
         )
         assert "FAILED" not in event_types
         completed = next(
