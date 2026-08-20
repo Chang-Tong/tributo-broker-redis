@@ -217,6 +217,45 @@ def test_legacy_secret_walk_rejects_secret_values_under_innocent_keys(
         request.resolve_training_config(allow_legacy_training_config=True)
 
 
+@pytest.mark.parametrize("auth", ["NONE", "NOSASL", "none", "nosasl"])
+@pytest.mark.parametrize("field", ["auth", "hive_auth"])
+def test_legacy_hive_passwordless_auth_is_executed(auth: str, field: str) -> None:
+    request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={
+            "data": {
+                "type": "hive",
+                "hive_sql": "SELECT 1",
+                field: auth,
+            }
+        },
+    )
+
+    config = request.resolve_training_config(allow_legacy_training_config=True)
+
+    assert config["data"][field] == auth.upper()
+
+
+@pytest.mark.parametrize("auth", ["LDAP", "CUSTOM", "KERBEROS", 7])
+@pytest.mark.parametrize("field", ["auth", "hive_auth"])
+def test_legacy_hive_rejects_unexecutable_auth_with_exact_path(
+    auth: object, field: str
+) -> None:
+    request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={
+            "data": {
+                "type": "hive",
+                "hive_sql": "SELECT 1",
+                field: auth,
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match=rf"training_config\.data\.{field}"):
+        request.resolve_training_config(allow_legacy_training_config=True)
+
+
 def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
     request = TrainingJobRequest.model_validate(
         {

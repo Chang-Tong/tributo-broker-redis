@@ -27,7 +27,14 @@ _DATASOURCE_PROPERTIES = {
     "LOCAL": frozenset({"path", "format"}),
     "CLICKHOUSE": frozenset({"sort_key", "parallelism"}),
     "HIVE": frozenset(
-        {"batch_size", "parallelism", "shard_mode", "hash_column", "hash_shards"}
+        {
+            "auth",
+            "batch_size",
+            "parallelism",
+            "shard_mode",
+            "hash_column",
+            "hash_shards",
+        }
     ),
 }
 _TASK_METRICS = {
@@ -361,6 +368,21 @@ def validate_supported_capabilities(request: TrainingJobRequest) -> None:
                 f"datasource.properties.{key}",
                 f"is not supported for {datasource_type}",
             )
+    if datasource_type == "HIVE":
+        auth = datasource.properties.get("auth", "NONE")
+        if not isinstance(auth, str):
+            _unsupported(
+                "datasource.properties.auth",
+                "must be NONE or NOSASL",
+            )
+        normalized_auth = auth.upper()
+        if normalized_auth not in {"NONE", "NOSASL"}:
+            detail = (
+                "LDAP/CUSTOM credential resolution is not implemented"
+                if normalized_auth in {"LDAP", "CUSTOM"}
+                else "supported values are NONE and NOSASL; Kerberos is not supported"
+            )
+            _unsupported("datasource.properties.auth", detail)
     if datasource_type in {"S3", "LOCAL"}:
         location_key = "uri" if datasource_type == "S3" else "path"
         location = datasource.properties.get(location_key)

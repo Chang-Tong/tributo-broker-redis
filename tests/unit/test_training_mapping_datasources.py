@@ -46,6 +46,7 @@ def test_hive_canonical_request_maps_all_core_fields_without_loss() -> None:
             "database_name": "warehouse",
             "username": "reader",
             "properties": {
+                "auth": "nosasl",
                 "batch_size": "512",
                 "shard_mode": "hash",
                 "hash_column": "subscriber_id",
@@ -64,6 +65,7 @@ def test_hive_canonical_request_maps_all_core_fields_without_loss() -> None:
         "hive_database": "warehouse",
         "hive_user": "reader",
         "hive_password": "",
+        "hive_auth": "NOSASL",
         "hive_sql": "SELECT x, label FROM samples",
         "hive_sql_params": {"tenant": "acme"},
         "hive_batch_size": 512,
@@ -91,6 +93,7 @@ def test_hive_defaults_hash_shards_to_64_and_omits_unspecified_options() -> None
     ).resolve_training_config()
 
     assert config["data"]["hive_hash_shards"] == 64
+    assert config["data"]["hive_auth"] == "NONE"
     assert "hive_batch_size" not in config["data"]
     assert "hive_parallelism" not in config["data"]
 
@@ -120,6 +123,35 @@ def test_hive_preserves_explicit_protocol_default_port() -> None:
 
     assert "port" in request.datasource.model_fields_set
     assert request.resolve_training_config()["data"]["hive_port"] == 9000
+
+
+@pytest.mark.parametrize("auth", ["NONE", "NOSASL", "none", "nosasl"])
+def test_hive_maps_supported_passwordless_auth(auth: str) -> None:
+    config = _request(
+        {
+            "type": "HIVE",
+            "host": "hive.internal",
+            "database_name": "warehouse",
+            "properties": {"auth": auth},
+        }
+    ).resolve_training_config()
+
+    assert config["data"]["hive_auth"] == auth.upper()
+
+
+@pytest.mark.parametrize("auth", ["LDAP", "CUSTOM", "KERBEROS", 7])
+def test_hive_rejects_unavailable_or_invalid_auth_with_exact_path(auth: object) -> None:
+    request = _request(
+        {
+            "type": "HIVE",
+            "host": "hive.internal",
+            "database_name": "warehouse",
+            "properties": {"auth": auth},
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"datasource\.properties\.auth"):
+        request.resolve_training_config()
 
 
 def test_clickhouse_maps_sort_key_parallelism_and_integer_port() -> None:

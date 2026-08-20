@@ -22,6 +22,7 @@ _CONTROL_HYPERPARAMS = {
 }
 _SIMPLE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HIVE_SHARD_MODES = frozenset({"auto", "hash", "offset"})
+_HIVE_PASSWORDLESS_AUTHS = frozenset({"NONE", "NOSASL"})
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"[a-z][a-z0-9+.-]*://[^/@\s]+@", re.IGNORECASE),
@@ -82,6 +83,18 @@ def _hive_shard_mode(value: Any) -> str:
         allowed = ", ".join(sorted(_HIVE_SHARD_MODES))
         raise ValueError(f"{name} must be one of: {allowed}")
     return value
+
+
+def _hive_auth(value: Any, name: str = "datasource.properties.auth") -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be NONE or NOSASL")
+    normalized = value.upper()
+    if normalized not in _HIVE_PASSWORDLESS_AUTHS:
+        raise ValueError(
+            f"{name} must be NONE or NOSASL; password-based and Kerberos auth "
+            "are unavailable in this Provider"
+        )
+    return normalized
 
 
 def _optional_integer(
@@ -166,6 +179,7 @@ def _data_config(request: TrainingJobRequest) -> dict[str, Any]:
             ),
             "hive_user": datasource.username or "default",
             "hive_password": datasource.password or "",
+            "hive_auth": _hive_auth(properties.get("auth", "NONE")),
             "hive_sql": _required(query.sql if query else None, "data_query.query.sql"),
             "hive_sql_params": query.params if query else {},
             "hive_hash_shards": _optional_integer(properties, "hash_shards") or 64,
@@ -430,6 +444,32 @@ def _validate_legacy_config(config: dict[str, Any]) -> None:
     walk(config, "")
 
 
+def _normalize_legacy_hive_auth(config: dict[str, Any]) -> None:
+    data = config.get("data")
+    if not isinstance(data, dict) or str(data.get("type", "")).lower() != "hive":
+        return
+    data = dict(data)
+    config["data"] = data
+
+    has_canonical = "auth" in data
+    has_prefixed = "hive_auth" in data
+    if has_canonical and has_prefixed:
+        canonical = _hive_auth(data["auth"], "training_config.data.auth")
+        prefixed = _hive_auth(data["hive_auth"], "training_config.data.hive_auth")
+        if canonical != prefixed:
+            raise ValueError(
+                "training_config.data.auth conflicts with "
+                "training_config.data.hive_auth"
+            )
+        data["auth"] = canonical
+        data["hive_auth"] = prefixed
+        return
+
+    key = "auth" if has_canonical else "hive_auth"
+    path = f"training_config.data.{key}"
+    data[key] = _hive_auth(data.get(key, "NONE"), path)
+
+
 def resolve_training_config(
     request: TrainingJobRequest,
     *,
@@ -446,6 +486,7 @@ def resolve_training_config(
             raise ValueError("training_config must be a non-empty object")
         config = dict(request.training_config)
         _validate_legacy_config(config)
+        _normalize_legacy_hive_auth(config)
     else:
         # Keep direct callers as safe as the Redis runtime: canonical requests
         # can never bypass capability or credential gates.

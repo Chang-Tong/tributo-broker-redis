@@ -9,7 +9,7 @@ silently dropped or downgraded.
 | --- | --- | --- |
 | Algorithm | XGBoost with validated objectives and a strict, typed hyperparameter allowlist | Other algorithms, deep-learning mode, unknown parameters, conflicting aliases or task-incompatible objectives/metrics |
 | Task | Binary classification, multiclass classification, regression | Clustering, time-series forecasting |
-| Data source | S3, LOCAL, ClickHouse, HiveServer2 | DORIS, JDBC, other source types |
+| Data source | S3, LOCAL, ClickHouse, HiveServer2 with `NONE`/`NOSASL` auth | Hive LDAP/CUSTOM/Kerberos auth, DORIS, JDBC, other source types |
 | Query | Direct query / file location | Table topology, relations, time-series pivot and component queries |
 | Features | Numeric/boolean regular passthrough columns; all four feature-engineering controls explicitly `NONE`/`PASSTHROUGH` | Omitted/AUTO feature engineering, string/category features, temporal roles, pivot/origin execution, label remapping and non-passthrough treatment |
 | Split | RANDOM, TIME_ORDERED with `data_split.order_column`, classification stratify | Other strategies, TIME_ORDERED without an order column, cross-validation |
@@ -35,6 +35,10 @@ Datasource `properties` use a per-type allowlist. Inline datasource passwords,
 S3 access keys, URI userinfo, connection strings and unresolved
 `credential_ref` values are rejected because this release has no credential
 resolver that could keep them out of Ray environment JSON.
+For Hive, `datasource.properties.auth` defaults to `NONE`; `NONE` and
+`NOSASL` are executed and case-normalized. LDAP/CUSTOM require credentials and
+are rejected until a secret-reference resolver exists. Kerberos is not
+advertised or silently downgraded.
 
 ## Legacy `training_config`
 
