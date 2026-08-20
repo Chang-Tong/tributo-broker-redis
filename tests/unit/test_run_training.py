@@ -21,6 +21,49 @@ from tributo_broker_redis.run_training import (
 )
 
 
+def _event_redis() -> MagicMock:
+    client = MagicMock()
+    client.xadd.return_value = "1-0"
+    client.xrevrange.return_value = []
+
+    def eval_script(script: str, _key_count: int, *args: object) -> object:
+        if "STAGE_TERMINAL_CANDIDATE" in script:
+            _key, encoded, _ttl, _job_id, _max_timestamp, _max_duration = args
+            return encoded
+        stream_key, job_id, encoded, _event_type, _phase, max_length = args
+        event_id = client.xadd(
+            stream_key,
+            {"job_id": job_id, "payload": encoded},
+            maxlen=int(str(max_length)),
+        )
+        return ["published", event_id]
+
+    client.eval.side_effect = eval_script
+    return client
+
+
+def _canonical_summary() -> dict[str, Any]:
+    return {
+        "feature_columns": ["x"],
+        "row_counts": {"train": 8, "val": 1, "test": 1},
+        "evaluation": {"eval_auc": 0.8, "eval_test_rows": 1},
+        "artifact_refs": [
+            {
+                "kind": "onnx",
+                "uri": "/tmp/models/model.onnx",
+                "sha256": "abc123",
+                "size_bytes": 1,
+            }
+        ],
+    }
+
+
+def _published_events(redis_client: MagicMock) -> list[dict[str, Any]]:
+    return [
+        json.loads(call.args[1]["payload"]) for call in redis_client.xadd.call_args_list
+    ]
+
+
 def test_worker_identity_falls_back_to_submission_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,19 +202,7 @@ def test_worker_uses_core_realtime_events_and_only_publishes_terminal(
 ) -> None:
     _set_worker_environment(monkeypatch)
     reporter = MagicMock()
-    summary = {
-        "feature_columns": ["x"],
-        "row_counts": {"train": 8, "val": 1, "test": 1},
-        "evaluation": {"eval_auc": 0.8, "eval_test_rows": 1},
-        "artifact_refs": [
-            {
-                "kind": "onnx",
-                "uri": "/tmp/models/model.onnx",
-                "sha256": "abc123",
-                "size_bytes": 1,
-            }
-        ],
-    }
+    summary = _canonical_summary()
     with (
         patch("tributo_broker_redis.run_training.create_redis_client", MagicMock()),
         patch(
@@ -188,11 +219,84 @@ def test_worker_uses_core_realtime_events_and_only_publishes_terminal(
     train.assert_called_once_with({})
     reporter.report_phase.assert_not_called()
     reporter.report_metrics.assert_not_called()
-    reporter.report_log.assert_not_called()
+    reporter.report_log.assert_called_once_with(
+        "job-1", "Training worker started", "info"
+    )
     reporter.report_completed.assert_not_called()
     payload = reporter.report_completed_payload.call_args.args[1]
     assert payload["phase"] == "COMPLETED"
     assert payload["result_summary"]["sample_rows"]["total"] == 10
+
+
+@pytest.mark.parametrize(
+    ("training_result", "return_code", "terminal_type"),
+    [
+        (_canonical_summary(), 0, "COMPLETED"),
+        (ValueError("controlled training failure"), 1, "FAILED"),
+    ],
+)
+def test_main_publishes_safe_worker_log_before_terminal_on_fake_redis(
+    monkeypatch: pytest.MonkeyPatch,
+    training_result: dict[str, Any] | BaseException,
+    return_code: int,
+    terminal_type: str,
+) -> None:
+    _set_worker_environment(monkeypatch)
+    redis_client = _event_redis()
+    trainer = (
+        patch(
+            "tributo.training.xgboost_trainer.run_training_with_config",
+            side_effect=training_result,
+        )
+        if isinstance(training_result, BaseException)
+        else patch(
+            "tributo.training.xgboost_trainer.run_training_with_config",
+            return_value=training_result,
+        )
+    )
+    with (
+        patch(
+            "tributo_broker_redis.run_training.create_redis_client",
+            return_value=redis_client,
+        ),
+        trainer,
+    ):
+        assert main() == return_code
+
+    events = _published_events(redis_client)
+    assert [event["event_type"] for event in events] == ["LOG", terminal_type]
+    assert events[0] == {
+        "protocol_version": "2.0",
+        "event_type": "LOG",
+        "job_id": "job-1",
+        "timestamp": events[0]["timestamp"],
+        "level": "info",
+        "message": "Training worker started",
+    }
+    assert "TRIBUTO_BROKER_REQUEST_JSON" not in json.dumps(events)
+
+
+def test_worker_start_log_failure_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_worker_environment(monkeypatch)
+    reporter = MagicMock()
+    reporter.report_log.side_effect = RuntimeError("redis unavailable")
+    reporter.report_completed_payload.return_value = True
+    with (
+        patch("tributo_broker_redis.run_training.create_redis_client", MagicMock()),
+        patch(
+            "tributo_broker_redis.run_training.RedisEventReporter",
+            return_value=reporter,
+        ),
+        patch(
+            "tributo.training.xgboost_trainer.run_training_with_config",
+            return_value=_canonical_summary(),
+        ),
+    ):
+        assert main() == 0
+
+    reporter.report_completed_payload.assert_called_once()
 
 
 def test_legacy_cancelled_summary_remains_cancelled_only(

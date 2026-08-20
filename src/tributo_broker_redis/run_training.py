@@ -147,6 +147,18 @@ def _is_training_cancelled_error(error: BaseException) -> bool:
     return False
 
 
+def _report_worker_started(reporter: RedisEventReporter, job_id: str) -> None:
+    """Emit one safe worker-boundary log without making training depend on it."""
+    try:
+        reporter.report_log(job_id, "Training worker started", "info")
+    except Exception as exc:
+        logger.warning(
+            "Worker start event was unavailable: job_id=%s error=%s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
 def main() -> int:
     started_at = time.monotonic()
     request_data = _read_json_env("TRIBUTO_BROKER_REQUEST_JSON")
@@ -163,6 +175,7 @@ def main() -> int:
     redis_client = create_redis_client(broker_config)
     reporter = RedisEventReporter(redis_client, broker_config, job_id)
     try:
+        _report_worker_started(reporter, job_id)
         from tributo.training.xgboost_trainer import run_training_with_config
 
         summary = run_training_with_config(training_config)
