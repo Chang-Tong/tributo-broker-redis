@@ -6,17 +6,28 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Mapping, Sequence, Set
 from typing import Any
 
 from tributo.integrations.broker import JobResult
 from tributo.training.execution_context import TrainingCancelledError
 
+from tributo_broker_redis.completion import (
+    build_completed_payload,
+    failure_phase,
+    redact_sensitive,
+)
 from tributo_broker_redis.config import RedisBrokerConfig
+from tributo_broker_redis.protocol import TrainingJobRequest
 from tributo_broker_redis.redis_client import create_redis_client
 from tributo_broker_redis.reporter import RedisEventReporter
 
 logger = logging.getLogger(__name__)
+
+
+class TerminalPublishError(RuntimeError):
+    """A terminal result could not be durably published to Redis."""
 
 
 def _read_json_env(name: str) -> dict[str, Any]:
@@ -27,34 +38,6 @@ def _read_json_env(name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Environment variable {name} must contain a JSON object")
     return value
-
-
-def _emit_history(
-    reporter: RedisEventReporter,
-    job_id: str,
-    summary: Mapping[str, Any],
-) -> None:
-    metrics = summary.get("metrics")
-    metric_values = metrics if isinstance(metrics, Mapping) else summary
-    histories: dict[str, list[Any]] = {}
-    for key, value in metric_values.items():
-        if key.endswith("_history") and isinstance(value, list):
-            histories[key.removesuffix("_history")] = value
-    if not histories:
-        return
-    total_rounds = max(len(values) for values in histories.values())
-    for index in range(total_rounds):
-        metrics = {
-            key: values[index]
-            for key, values in histories.items()
-            if index < len(values) and isinstance(values[index], (int, float))
-        }
-        if metrics:
-            reporter.report_metrics(
-                job_id,
-                {key: float(value) for key, value in metrics.items()},
-                (index + 1) / total_rounds,
-            )
 
 
 def _result_from_summary(
@@ -165,6 +148,7 @@ def _is_training_cancelled_error(error: BaseException) -> bool:
 
 
 def main() -> int:
+    started_at = time.monotonic()
     request_data = _read_json_env("TRIBUTO_BROKER_REQUEST_JSON")
     training_config = _read_json_env("TRIBUTO_TRAINING_CONFIG_JSON")
     broker_config = RedisBrokerConfig.from_mapping(
@@ -174,46 +158,85 @@ def main() -> int:
     if not isinstance(raw_job_id, str) or not raw_job_id:
         raise ValueError("Training job request is missing a non-empty job_id")
     job_id = raw_job_id
+    request_data["job_id"] = job_id
+    request = TrainingJobRequest.model_validate(request_data)
     redis_client = create_redis_client(broker_config)
     reporter = RedisEventReporter(redis_client, broker_config, job_id)
     try:
-        reporter.report_phase(job_id, "TRAINING")
-        reporter.report_log(job_id, "Training started", "INFO")
         from tributo.training.xgboost_trainer import run_training_with_config
 
-        summary = run_training_with_config(
-            {
-                **training_config,
-                "_tributo_execution_context": json.loads(
-                    os.environ.get("TRIBUTO_EXECUTION_CONTEXT", "{}")
-                ),
-            }
-        )
+        summary = run_training_with_config(training_config)
         if not isinstance(summary, dict):
             summary = {"result": summary}
         raw_metrics = summary.get("metrics")
         if isinstance(raw_metrics, Mapping) and raw_metrics.get("_tributo_cancelled"):
-            reporter.report_cancelled(job_id, "TRAINING")
+            published = reporter.report_cancelled(
+                job_id,
+                "TRAINING",
+                duration_seconds=time.monotonic() - started_at,
+            )
+            if not published:
+                raise TerminalPublishError("CANCELLED terminal event was not published")
             return 0
-        _emit_history(reporter, job_id, summary)
-        execution_id, submission_id = _worker_job_identity()
-        result = _result_from_summary(
+        if request.training_config is not None:
+            execution_id, submission_id = _worker_job_identity()
+            published = reporter.report_legacy_completed(
+                job_id,
+                _result_from_summary(
+                    job_id,
+                    summary,
+                    run_id=os.environ.get("TRIBUTO_RUN_ID"),
+                    attempt_id=os.environ.get("TRIBUTO_ATTEMPT_ID"),
+                    execution_id=execution_id,
+                    submission_id=submission_id,
+                ),
+            )
+            if not published:
+                raise TerminalPublishError("COMPLETED terminal event was not published")
+            return 0
+        published = reporter.report_completed_payload(
             job_id,
-            summary,
-            run_id=os.environ.get("TRIBUTO_RUN_ID"),
-            attempt_id=os.environ.get("TRIBUTO_ATTEMPT_ID"),
-            execution_id=execution_id,
-            submission_id=submission_id,
+            build_completed_payload(
+                request,
+                summary,
+                duration_seconds=time.monotonic() - started_at,
+            ),
         )
-        reporter.report_completed(job_id, result)
+        if not published:
+            raise TerminalPublishError("COMPLETED terminal event was not published")
         return 0
+    except TerminalPublishError:
+        # A second terminal would create contradictory state. Let Ray record
+        # this execution as FAILED; durable replay belongs to the supervisor.
+        raise
     except Exception as exc:
         if _is_training_cancelled_error(exc):
             logger.info("Redis broker training job cancelled: job_id=%s", job_id)
-            reporter.report_cancelled(job_id, "TRAINING")
+            published = reporter.report_cancelled(
+                job_id,
+                "TRAINING",
+                duration_seconds=time.monotonic() - started_at,
+            )
+            if not published:
+                raise TerminalPublishError(
+                    "CANCELLED terminal event was not published"
+                ) from exc
             return 0
-        logger.exception("Redis broker training job failed: job_id=%s", job_id)
-        reporter.report_failed_with_code(job_id, str(exc), type(exc).__name__)
+        logger.error(
+            "Redis broker training job failed: job_id=%s error=%s",
+            job_id,
+            redact_sensitive(str(exc)),
+        )
+        published = reporter.report_failed_with_code(
+            job_id,
+            exc,
+            phase=failure_phase(exc),
+            duration_seconds=time.monotonic() - started_at,
+        )
+        if not published:
+            raise TerminalPublishError(
+                "FAILED terminal event was not published"
+            ) from exc
         return 1
     finally:
         close = getattr(redis_client, "close", None)

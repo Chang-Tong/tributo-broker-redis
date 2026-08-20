@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from tributo.training.xgboost_trainer import XGBoostTrainingConfig
 
 from tributo_broker_redis.protocol import TrainingJobRequest
 
 
-def _request(datasource: dict, *, sql: str = "SELECT x, label FROM samples"):
-    return TrainingJobRequest.model_validate(
-        {
-            "job_id": "job-1",
-            "datasource": datasource,
-            "data_query": {"query": {"sql": sql, "params": {"tenant": "acme"}}},
-            "features": [{"feature_id": "f1", "result_column": "x"}],
-            "target": {
-                "result_column": "label",
-                "task_type": "BINARY_CLASSIFICATION",
-            },
-            "storage_context": {"type": "local", "prefix": "/tmp/models/"},
-        }
-    )
+def _request(
+    datasource: dict[str, Any], *, sql: str = "SELECT x, label FROM samples"
+) -> TrainingJobRequest:
+    payload: dict[str, Any] = {
+        "job_id": "job-1",
+        "model_id": "model-1",
+        "version_id": "version-1",
+        "tenant_id": "tenant-1",
+        "datasource": datasource,
+        "features": [{"feature_id": "f1", "result_column": "x"}],
+        "target": {
+            "result_column": "label",
+            "task_type": "BINARY_CLASSIFICATION",
+        },
+        "feature_engineering": {
+            "default_missing_value_strategy": "NONE",
+            "default_outlier_strategy": "NONE",
+            "default_scaling_method": "NONE",
+            "default_encoding_method": "NONE",
+        },
+        "storage_context": {"type": "local", "prefix": "/tmp/models/"},
+    }
+    if str(datasource.get("type", "")).upper() in {"CLICKHOUSE", "HIVE"}:
+        payload["data_query"] = {"query": {"sql": sql, "params": {"tenant": "acme"}}}
+    return TrainingJobRequest.model_validate(payload)
 
 
 def test_hive_canonical_request_maps_all_core_fields_without_loss() -> None:
@@ -29,10 +42,9 @@ def test_hive_canonical_request_maps_all_core_fields_without_loss() -> None:
         {
             "type": "HIVE",
             "host": "hive.internal",
-            "port": "10000",
+            "port": 10000,
             "database_name": "warehouse",
             "username": "reader",
-            "password": "secret",
             "properties": {
                 "batch_size": "512",
                 "shard_mode": "hash",
@@ -51,7 +63,7 @@ def test_hive_canonical_request_maps_all_core_fields_without_loss() -> None:
         "hive_port": 10000,
         "hive_database": "warehouse",
         "hive_user": "reader",
-        "hive_password": "secret",
+        "hive_password": "",
         "hive_sql": "SELECT x, label FROM samples",
         "hive_sql_params": {"tenant": "acme"},
         "hive_batch_size": 512,
@@ -115,7 +127,7 @@ def test_clickhouse_maps_sort_key_parallelism_and_integer_port() -> None:
         {
             "type": "CLICKHOUSE",
             "host": "clickhouse.internal",
-            "port": "8123",
+            "port": 8123,
             "database_name": "analytics",
             "properties": {"sort_key": "event_id", "parallelism": "3"},
         }
@@ -243,7 +255,7 @@ def test_database_port_range_error_keeps_datasource_path(port: int) -> None:
     ],
 )
 def test_hive_missing_required_fields_have_canonical_paths(
-    datasource: dict,
+    datasource: dict[str, Any],
     sql: str,
     path: str,
 ) -> None:
@@ -307,7 +319,9 @@ def test_invalid_integer_properties_report_exact_field_path(
         ),
     ],
 )
-def test_s3_and_local_mapping_regression(datasource: dict, expected: dict) -> None:
+def test_s3_and_local_mapping_regression(
+    datasource: dict[str, Any], expected: dict[str, Any]
+) -> None:
     data = _request(datasource).resolve_training_config()["data"]
     for key, value in expected.items():
         assert data[key] == value

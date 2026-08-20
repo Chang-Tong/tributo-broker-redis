@@ -8,9 +8,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from tributo.integrations.broker import (
     BrokerRuntime,
     CancellationSpec,
+    EventReporterSpec,
     JobResult,
     Message,
     TaskDisposition,
@@ -18,6 +20,8 @@ from tributo.integrations.broker import (
 )
 from tributo.training.job_submitter import submit_training_job_with_identity
 
+from tributo_broker_redis.capabilities import validate_supported_capabilities
+from tributo_broker_redis.completion import redact_sensitive
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.protocol import (
@@ -29,6 +33,15 @@ from tributo_broker_redis.redis_client import create_redis_client
 from tributo_broker_redis.reporter import RedisEventReporter
 
 logger = logging.getLogger(__name__)
+
+
+def _validation_message(error: ValidationError) -> str:
+    """Render Pydantic locations as canonical dotted field paths."""
+    messages = []
+    for item in error.errors(include_url=False):
+        path = ".".join(str(part) for part in item["loc"])
+        messages.append(f"{path}: {item['msg']}" if path else item["msg"])
+    return "; ".join(messages)
 
 
 class RedisBrokerRuntime(BrokerRuntime):
@@ -64,6 +77,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             error,
             code,
             delivery_id=message.delivery_id,
+            phase="QUEUED",
         )
         return TaskOutcome(
             disposition=TaskDisposition.ACK,
@@ -122,7 +136,15 @@ class RedisBrokerRuntime(BrokerRuntime):
         reporter = RedisEventReporter(self._redis, self.config, message.job_id)
         try:
             request = TrainingJobRequest.model_validate(request_data)
-            training_config = request.resolve_training_config()
+            if request.training_config is None:
+                validate_supported_capabilities(request)
+            training_config = request.resolve_training_config(
+                allow_legacy_training_config=self.config.allow_legacy_training_config
+            )
+        except ValidationError as exc:
+            return self._report_invalid(
+                message, _validation_message(exc), "INVALID_PAYLOAD"
+            )
         except Exception as exc:
             return self._report_invalid(message, str(exc), "INVALID_PAYLOAD")
 
@@ -140,13 +162,25 @@ class RedisBrokerRuntime(BrokerRuntime):
             job_id=message.job_id,
             options={"config_env": "TRIBUTO_BROKER_CONFIG_JSON"},
         )
-        execution_context = {"cancellation": cancellation.as_dict()}
+        event_reporter = EventReporterSpec(
+            broker_id="knova-redis",
+            job_id=message.job_id,
+            options={"config_env": "TRIBUTO_BROKER_CONFIG_JSON"},
+        )
+        execution_context = {
+            "cancellation": cancellation.as_dict(),
+            "event_reporter": event_reporter.as_dict(),
+        }
         reporter.report_phase(message.job_id, "QUEUED")
         try:
             entrypoint = "python -m tributo_broker_redis.run_training"
             env_vars = dict(self.config.env_vars)
+            worker_request_data = dict(request_data)
+            # Protocol extensions are opaque Driver-side metadata. They are
+            # intentionally never executed or copied into Ray worker env JSON.
+            worker_request_data.pop("extensions", None)
             env_vars["TRIBUTO_BROKER_REQUEST_JSON"] = json.dumps(
-                request_data,
+                worker_request_data,
                 separators=(",", ":"),
             )
             worker_config = self.config.model_dump(
@@ -181,17 +215,17 @@ class RedisBrokerRuntime(BrokerRuntime):
                 execution_context=execution_context,
             )
         except Exception as exc:
+            safe_error = redact_sensitive(str(exc))
             logger.warning(
-                "Ray submission failed; leaving task pending: job_id=%s",
+                "Ray submission failed; leaving task pending: job_id=%s error=%s",
                 message.job_id,
-                exc_info=True,
+                safe_error,
             )
             return TaskOutcome(
                 disposition=TaskDisposition.RETRY,
-                error=str(exc),
+                error=safe_error,
             )
 
-        reporter.report_phase(message.job_id, "LOADING_DATA")
         return TaskOutcome(
             disposition=TaskDisposition.ACK,
             result=JobResult(
@@ -207,11 +241,11 @@ class RedisBrokerRuntime(BrokerRuntime):
     def _is_cancelled(self, job_id: str) -> bool:
         try:
             return bool(self._redis.exists(self.config.cancel_key(job_id)))
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Redis cancel check unavailable; continuing task: job_id=%s",
+                "Redis cancel check unavailable; continuing task: job_id=%s error=%s",
                 job_id,
-                exc_info=True,
+                type(exc).__name__,
             )
             return False
 

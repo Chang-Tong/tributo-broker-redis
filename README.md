@@ -43,6 +43,7 @@ provider validates all fields.
   "claim_count": 10,
   "max_payload_bytes": 1048576,
   "max_event_bytes": 1048576,
+  "allow_legacy_training_config": false,
   "ray_dashboard_url": "http://ray-head:8265",
   "runtime_pip_packages": ["/provider/tributo_broker_redis-<version>-py3-none-any.whl"]
 }
@@ -88,8 +89,12 @@ API v1, stable Ray submission identity, and worker execution context support.
 - Invalid payloads are reported as `FAILED` on a best-effort basis and then
   acknowledged. Missing outer `job_id` messages use the invalid-event stream
   and never receive a sentinel identity.
-- Training metrics history is replayed after training. Real-time metric sinks
-  are outside provider v1.
+- Core phase events and sampled rank-0 round metrics are published in real
+  time through the Provider worker bridge. The Provider sends `QUEUED` before
+  submission and owns the single terminal event; it does not replay history.
+
+See the [protocol-v2 capability matrix](docs/protocol-v2-capabilities.md) for
+the supported execution surface and fail-fast unsupported field paths.
 
 ## Topology support
 

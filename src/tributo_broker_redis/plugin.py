@@ -14,10 +14,14 @@ from tributo.integrations.broker import (
     BrokerRuntime,
     CancellationChecker,
     CancellationSpec,
+    EventReporter,
+    EventReporterSpec,
 )
 
 from tributo_broker_redis.cancellation import build_cancellation_checker
 from tributo_broker_redis.config import RedisBrokerConfig
+from tributo_broker_redis.redis_client import create_redis_client
+from tributo_broker_redis.reporter import RedisEventReporter
 from tributo_broker_redis.runtime import create_runtime
 
 logger = logging.getLogger(__name__)
@@ -69,8 +73,14 @@ class RedisBrokerPlugin(BrokerPlugin):
         config = self._config_from_spec(spec)
         return build_cancellation_checker(spec, config)
 
+    def create_event_reporter(self, spec: EventReporterSpec) -> EventReporter:
+        config = self._config_from_spec(spec)
+        return RedisEventReporter(create_redis_client(config), config, spec.job_id)
+
     @staticmethod
-    def _config_from_spec(spec: CancellationSpec) -> RedisBrokerConfig:
+    def _config_from_spec(
+        spec: CancellationSpec | EventReporterSpec,
+    ) -> RedisBrokerConfig:
         options = spec.options
         config_env = options.get("config_env")
         if isinstance(config_env, str):
@@ -83,5 +93,5 @@ class RedisBrokerPlugin(BrokerPlugin):
         if isinstance(config, dict):
             return RedisBrokerConfig.from_mapping(config)
         raise ValueError(
-            "knova-redis cancellation spec requires config_env or a safe config"
+            "knova-redis execution spec requires config_env or a safe config"
         )

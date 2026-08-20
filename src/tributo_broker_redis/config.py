@@ -53,6 +53,7 @@ class RedisBrokerConfig(BaseModel):
     runtime_pip_packages: list[str] = Field(default_factory=list)
     env_vars: dict[str, str] = Field(default_factory=dict)
     project_root: str | None = None
+    allow_legacy_training_config: bool = False
 
     @field_validator("url", "worker_url")
     @classmethod

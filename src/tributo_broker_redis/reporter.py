@@ -10,12 +10,35 @@ from typing import Any
 
 from tributo.integrations.broker import EventReporter, JobResult
 
+from tributo_broker_redis.completion import (
+    build_cancelled_payload,
+    build_failed_payload,
+    finite_float,
+    redact_sensitive,
+)
 from tributo_broker_redis.config import RedisBrokerConfig
-from tributo_broker_redis.protocol import event_payload
+from tributo_broker_redis.protocol import ProcessMetric, event_payload
 
 logger = logging.getLogger(__name__)
 
 _LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "success"})
+_METRIC_NAMES = {
+    "logloss": "loss",
+    "mlogloss": "loss",
+    "error": "accuracy",
+    "merror": "accuracy",
+    "roc_auc": "auc",
+    "aucpr": "average_precision",
+}
+_ERROR_RATE_METRICS = frozenset({"error", "merror"})
+_PHASE_MESSAGES = {
+    "QUEUED": "Training job queued",
+    "LOADING_DATA": "Loading training data",
+    "FEATURE_ENGINEERING": "Preparing model features",
+    "DATA_SPLITTING": "Splitting training, validation, and test data",
+    "TRAINING": "Training model",
+    "EVALUATING": "Evaluating and exporting model",
+}
 
 
 class RedisEventReporter(EventReporter):
@@ -42,6 +65,7 @@ class RedisEventReporter(EventReporter):
         self._sleep = sleep
         self._terminal_sent = False
         self._last_failure_log_at: float | None = None
+        self._started_at = time.monotonic()
 
     @property
     def job_id(self) -> str | None:
@@ -92,9 +116,10 @@ class RedisEventReporter(EventReporter):
         )
         for attempt in range(self._config.max_publish_retries + 1):
             try:
-                fields = {"payload": encoded}
-                if effective_job_id is not None:
-                    fields["job_id"] = effective_job_id
+                fields = {
+                    "job_id": effective_job_id or "",
+                    "payload": encoded,
+                }
                 self._redis.xadd(
                     stream_key,
                     fields,
@@ -114,13 +139,13 @@ class RedisEventReporter(EventReporter):
                     self._last_failure_log_at = now
                     logger.warning(
                         "Failed to publish broker event: job_id=%s event_type=%s "
-                        "attempt=%d/%d error=%s",
+                        "attempt=%d/%d error=%s detail=%s",
                         effective_job_id,
                         event_type,
                         attempt + 1,
                         self._config.max_publish_retries + 1,
                         type(exc).__name__,
-                        exc_info=True,
+                        redact_sensitive(str(exc)),
                     )
                 else:
                     logger.debug(
@@ -136,7 +161,11 @@ class RedisEventReporter(EventReporter):
         return False
 
     def report_phase(self, job_id: str, phase: str) -> None:
-        self._publish(job_id, "PHASE", {"phase": phase})
+        self._publish(
+            job_id,
+            "PHASE",
+            {"phase": phase, "message": _PHASE_MESSAGES.get(phase, phase)},
+        )
 
     def report_log(self, job_id: str, message: str, level: str = "INFO") -> None:
         normalized_level = level.strip().lower()
@@ -150,7 +179,7 @@ class RedisEventReporter(EventReporter):
         self._publish(
             job_id,
             "LOG",
-            {"message": message, "level": normalized_level},
+            {"message": redact_sensitive(message), "level": normalized_level},
         )
 
     def report_metrics(
@@ -159,18 +188,53 @@ class RedisEventReporter(EventReporter):
         metrics: dict[str, float],
         progress: float,
     ) -> None:
+        progress = finite_float(progress, "progress")
+        if not 0 <= progress <= 1:
+            raise ValueError("progress must be in [0, 1]")
+        current_round = int(metrics.get("round", 0))
+        total_rounds = (
+            max(current_round, int(round(current_round / progress)))
+            if current_round and progress
+            else current_round
+        )
+        values: dict[str, dict[str, Any]] = {}
+        for raw_name, raw_value in metrics.items():
+            if raw_name == "round":
+                continue
+            value = finite_float(raw_value, f"metrics.{raw_name}")
+            scope, separator, metric_name = raw_name.partition("-")
+            if not separator:
+                metric_name = raw_name
+                scope = "eval"
+            if metric_name in _ERROR_RATE_METRICS:
+                if not 0 <= value <= 1:
+                    raise ValueError(f"metrics.{raw_name} error rate must be in [0, 1]")
+                value = 1.0 - value
+            metric_name = _METRIC_NAMES.get(metric_name, metric_name)
+            entry = values.setdefault(metric_name, {"metric_name": metric_name})
+            entry["train" if scope == "train" else "eval"] = value
+        process_metrics = [
+            ProcessMetric.model_validate(value).model_dump(exclude_none=True)
+            for value in values.values()
+        ]
         self._publish(
             job_id,
             "METRICS",
             {
-                "progress": progress,
+                "phase": "TRAINING",
+                "current_round": current_round,
+                "total_rounds": total_rounds,
                 "progress_percent": round(progress * 100, 1),
-                "metrics": metrics,
+                "metrics": process_metrics,
             },
         )
 
     def report_completed(self, job_id: str, result: JobResult) -> None:
-        self._publish(
+        self.report_legacy_completed(job_id, result)
+
+    def report_legacy_completed(self, job_id: str, result: JobResult) -> bool:
+        """Publish and expose durability for the opt-in legacy worker path."""
+        return self._publish(
             job_id,
             "COMPLETED",
             {
@@ -188,21 +252,33 @@ class RedisEventReporter(EventReporter):
             },
         )
 
+    def report_completed_payload(self, job_id: str, payload: dict[str, Any]) -> bool:
+        """Publish a completion already built from Core's neutral summary."""
+        return self._publish(job_id, "COMPLETED", payload)
+
     def report_failed(self, job_id: str, error: str) -> None:
         self.report_failed_with_code(job_id, error)
 
     def report_failed_with_code(
         self,
         job_id: str | None,
-        error: str,
-        error_code: str = "UNKNOWN",
+        error: BaseException | str,
+        error_code: str | None = None,
         *,
         delivery_id: str | None = None,
+        phase: str = "TRAINING",
+        duration_seconds: float | None = None,
     ) -> bool:
-        payload: dict[str, Any] = {
-            "error_message": error,
-            "error_code": error_code,
-        }
+        payload = build_failed_payload(
+            error,
+            phase=phase,
+            duration_seconds=(
+                time.monotonic() - self._started_at
+                if duration_seconds is None
+                else duration_seconds
+            ),
+            error_code=error_code,
+        )
         if delivery_id is not None:
             payload["delivery_id"] = delivery_id
         return self._publish(
@@ -211,5 +287,24 @@ class RedisEventReporter(EventReporter):
             payload,
         )
 
-    def report_cancelled(self, job_id: str, phase: str = "TRAINING") -> None:
-        self._publish(job_id, "CANCELLED", {"phase": phase})
+    def report_cancelled(
+        self,
+        job_id: str,
+        phase: str = "TRAINING",
+        *,
+        duration_seconds: float | None = None,
+        has_best_model: bool = False,
+    ) -> bool:
+        return self._publish(
+            job_id,
+            "CANCELLED",
+            build_cancelled_payload(
+                phase=phase,
+                duration_seconds=(
+                    time.monotonic() - self._started_at
+                    if duration_seconds is None
+                    else duration_seconds
+                ),
+                has_best_model=has_best_model,
+            ),
+        )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -133,7 +134,7 @@ def test_invalid_payload_is_acked_even_when_failed_event_cannot_publish() -> Non
 
 def test_missing_job_id_is_failed_and_acked_on_dedicated_stream() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
-    runtime.config = RedisBrokerConfig()
+    runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
     runtime._redis = MagicMock()
     runtime._consumer = MagicMock()
     result = runtime.handle(Message(None, {"raw": "{}"}, delivery_id="7-0"))
@@ -145,6 +146,7 @@ def test_missing_job_id_is_failed_and_acked_on_dedicated_stream() -> None:
 
 def test_runtime_passes_business_job_id_to_submission() -> None:
     config = RedisBrokerConfig(
+        allow_legacy_training_config=True,
         extra_py_modules=["/provider/tributo_broker_redis"],
         worker_password_env="WORKER_REDIS_PASSWORD",
     )
@@ -171,6 +173,9 @@ def test_runtime_passes_business_job_id_to_submission() -> None:
                         {
                             "protocol_version": "2.0",
                             "job_id": "payload-job",
+                            "model_id": "model-1",
+                            "version_id": "version-1",
+                            "tenant_id": "tenant-1",
                             "training_config": {"data": {"type": "csv"}},
                         }
                     )
@@ -188,6 +193,37 @@ def test_runtime_passes_business_job_id_to_submission() -> None:
         submit.call_args.kwargs["env_vars"]["TRIBUTO_BROKER_CONFIG_JSON"]
     )
     assert worker_config["password_env"] == "WORKER_REDIS_PASSWORD"
+
+
+def test_runtime_rejects_legacy_training_config_without_explicit_opt_in() -> None:
+    runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
+    runtime.config = RedisBrokerConfig()
+    runtime._redis = MagicMock()
+    runtime._consumer = MagicMock()
+
+    with patch(
+        "tributo_broker_redis.runtime.submit_training_job_with_identity"
+    ) as submit:
+        outcome = runtime.handle(
+            Message(
+                "job-1",
+                {
+                    "raw": json.dumps(
+                        {
+                            "protocol_version": "2.0",
+                            "training_config": {"data": {"type": "csv"}},
+                        }
+                    )
+                },
+                delivery_id="1-0",
+            )
+        )
+
+    assert outcome.disposition == TaskDisposition.ACK
+    submit.assert_not_called()
+    event = json.loads(runtime._redis.xadd.call_args.args[1]["payload"])
+    assert event["error_code"] == "INVALID_PAYLOAD"
+    assert "legacy and disabled" in event["error_message"]
 
 
 def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
@@ -213,6 +249,9 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
                         {
                             "protocol_version": "2.0",
                             "job_id": "payload-job",
+                            "model_id": "model-1",
+                            "version_id": "version-1",
+                            "tenant_id": "tenant-1",
                             "algorithm": {
                                 "algorithm_key": "xgboost",
                                 "hyper_params": {
@@ -233,6 +272,12 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
                                 "result_column": "label",
                                 "task_type": "BINARY_CLASSIFICATION",
                             },
+                            "feature_engineering": {
+                                "default_missing_value_strategy": "NONE",
+                                "default_outlier_strategy": "NONE",
+                                "default_scaling_method": "NONE",
+                                "default_encoding_method": "NONE",
+                            },
                             "data_split": {
                                 "train_ratio": 0.5,
                                 "validation_ratio": 0.5,
@@ -241,6 +286,9 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
                             "storage_context": {
                                 "type": "local",
                                 "prefix": "/tmp/ray_results/bundles/",
+                            },
+                            "extensions": {
+                                "future_metadata": {"authorization": "not-forwarded"}
                             },
                         }
                     )
@@ -252,15 +300,38 @@ def test_runtime_maps_canonical_v2_request_without_training_config() -> None:
     config = json.loads(
         submit.call_args.kwargs["env_vars"]["TRIBUTO_TRAINING_CONFIG_JSON"]
     )
+    worker_request = json.loads(
+        submit.call_args.kwargs["env_vars"]["TRIBUTO_BROKER_REQUEST_JSON"]
+    )
+    assert "extensions" not in worker_request
     assert config["data"]["path"] == "/provider-data/train.csv"
     assert config["model"]["eta"] == 0.2
     assert config["training"]["num_rounds"] == 3
     assert config["ray"]["storage_path"] == "/tmp/ray_results/bundles/_ray"
-    assert config["output"]["bundle_uri"] == "/tmp/ray_results/bundles"
+    assert config["output"]["onnx_path"] == "/tmp/ray_results/bundles/model.onnx"
+    execution_context = submit.call_args.kwargs["execution_context"]
+    assert execution_context == {
+        "cancellation": {
+            "broker_id": "knova-redis",
+            "job_id": "canonical-job",
+            "options": {"config_env": "TRIBUTO_BROKER_CONFIG_JSON"},
+        },
+        "event_reporter": {
+            "broker_id": "knova-redis",
+            "job_id": "canonical-job",
+            "options": {"config_env": "TRIBUTO_BROKER_CONFIG_JSON"},
+        },
+    }
+    assert "password" not in json.dumps(execution_context).lower()
+    phase_events = [
+        json.loads(call.args[1]["payload"])
+        for call in runtime._redis.xadd.call_args_list
+    ]
+    assert [event["phase"] for event in phase_events] == ["QUEUED"]
 
 
 def test_redelivery_reuses_same_ray_execution_attempt() -> None:
-    config = RedisBrokerConfig()
+    config = RedisBrokerConfig(allow_legacy_training_config=True)
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
     runtime.config = config
     runtime._redis = MagicMock()
@@ -324,7 +395,7 @@ def test_redelivery_reuses_same_ray_execution_attempt() -> None:
 
 def test_pre_submission_cancellation_is_acked_without_ray_submission() -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
-    runtime.config = RedisBrokerConfig()
+    runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
     runtime._redis = MagicMock()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: True)
@@ -392,15 +463,22 @@ def test_oversized_payload_is_failed_and_acked() -> None:
     assert event["error_code"] == "PAYLOAD_TOO_LARGE"
 
 
-def test_temporary_ray_submission_failure_leaves_message_for_retry() -> None:
+def test_temporary_ray_submission_failure_leaves_message_for_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     runtime = RedisBrokerRuntime.__new__(RedisBrokerRuntime)
-    runtime.config = RedisBrokerConfig()
+    runtime.config = RedisBrokerConfig(allow_legacy_training_config=True)
     runtime._redis = MagicMock()
     runtime._consumer = MagicMock()
     object.__setattr__(runtime, "_is_cancelled", lambda _job_id: False)
-    with patch(
-        "tributo_broker_redis.runtime.submit_training_job_with_identity",
-        side_effect=RuntimeError("ray unavailable"),
+    with (
+        patch(
+            "tributo_broker_redis.runtime.submit_training_job_with_identity",
+            side_effect=RuntimeError(
+                "ray unavailable password=hunter2 Bearer opaque-token"
+            ),
+        ),
+        caplog.at_level(logging.WARNING, logger="tributo_broker_redis.runtime"),
     ):
         result = runtime.handle(
             Message(
@@ -416,6 +494,11 @@ def test_temporary_ray_submission_failure_leaves_message_for_retry() -> None:
             )
         )
     assert result.disposition == TaskDisposition.RETRY
+    assert result.error is not None
+    assert "hunter2" not in result.error
+    assert "opaque-token" not in result.error
+    assert "hunter2" not in caplog.text
+    assert "opaque-token" not in caplog.text
 
 
 def test_ack_failure_enters_reconnecting_without_second_ack() -> None:

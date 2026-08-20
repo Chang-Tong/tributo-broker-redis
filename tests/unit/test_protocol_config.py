@@ -24,13 +24,143 @@ def test_protocol_version_and_training_scope() -> None:
     assert check_protocol_version({"protocol_version": "1.9"})
     assert is_training_task({}) is True
     assert is_training_task({"task_type": "INFERENCE"}) is False
+    assert is_training_task({"job_type": "TRAINING", "task_type": "INFERENCE"}) is False
+    with pytest.raises(ValidationError, match="job_type/task_type conflict"):
+        TrainingJobRequest.model_validate(
+            {
+                "job_id": "job-1",
+                "job_type": "TRAINING",
+                "task_type": "INFERENCE",
+                "training_config": {"data": {}},
+            }
+        )
 
 
-def test_training_request_preserves_explicit_config() -> None:
+def test_training_request_rejects_legacy_config_by_default() -> None:
     request = TrainingJobRequest(job_id="job-1", training_config={"data": {}})
-    assert request.resolve_training_config() == {"data": {}}
+    with pytest.raises(ValueError, match="legacy and disabled"):
+        request.resolve_training_config()
+    assert request.resolve_training_config(allow_legacy_training_config=True) == {
+        "data": {}
+    }
     with pytest.raises(ValueError, match="non-empty"):
-        TrainingJobRequest(job_id="job-1", training_config={}).resolve_training_config()
+        TrainingJobRequest(job_id="job-1", training_config={}).resolve_training_config(
+            allow_legacy_training_config=True
+        )
+
+
+def test_protocol_models_forbid_unknown_fields() -> None:
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        TrainingJobRequest.model_validate({"job_id": "job-1", "surprise": True})
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        TrainingJobRequest.model_validate(
+            {
+                "job_id": "job-1",
+                "algorithm": {"algorithm_key": "xgboost", "surprise": 1},
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["model_id", "version_id", "tenant_id"])
+def test_canonical_protocol_requires_non_empty_ownership_identity(field: str) -> None:
+    payload = {
+        "job_id": "job-1",
+        "model_id": "model-1",
+        "version_id": "version-1",
+        "tenant_id": "tenant-1",
+        "features": [{"feature_id": "f1", "result_column": "x"}],
+    }
+    payload[field] = ""
+    with pytest.raises(ValidationError, match=field):
+        TrainingJobRequest.model_validate(payload)
+
+
+def test_canonical_protocol_requires_feature_ids() -> None:
+    with pytest.raises(ValidationError, match=r"features\.0\.feature_id"):
+        TrainingJobRequest.model_validate(
+            {
+                "job_id": "job-1",
+                "model_id": "model-1",
+                "version_id": "version-1",
+                "tenant_id": "tenant-1",
+                "features": [{"result_column": "x"}],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("algorithm.is_deep_learning", {"algorithm": {"is_deep_learning": "false"}}),
+        ("evaluation.enabled", {"evaluation": {"enabled": "false"}}),
+        ("resource_limits.max_epochs", {"resource_limits": {"max_epochs": "10"}}),
+    ],
+)
+def test_protocol_models_are_strict_and_never_coerce_wire_scalars(
+    path: str, payload: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError) as captured:
+        TrainingJobRequest.model_validate({"job_id": "job-1", **payload})
+
+    assert ".".join(str(part) for part in captured.value.errors()[0]["loc"]) == path
+
+
+def test_legacy_config_cannot_override_runtime_identity_or_broker_fields() -> None:
+    request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={"execution_context": {"job_id": "other"}},
+    )
+    with pytest.raises(ValueError, match="cannot override.*execution_context"):
+        request.resolve_training_config(allow_legacy_training_config=True)
+
+    secret_request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={"data": {"s3": {"secret_access_key": "inline"}}},
+    )
+    with pytest.raises(
+        ValueError, match=r"inline secret field data\.s3\.secret_access_key"
+    ):
+        secret_request.resolve_training_config(allow_legacy_training_config=True)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_legacy_secret_walk_rejects_nested_sequences_and_camel_case(
+    container: type[list[object]] | type[tuple[object, ...]],
+) -> None:
+    nested = container([{"accessToken": "inline"}, {"privateKey": "inline"}])
+    request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={"data": {"items": nested}},
+    )
+
+    with pytest.raises(
+        ValueError, match=r"inline secret field data\.items\.0\.accessToken"
+    ):
+        request.resolve_training_config(allow_legacy_training_config=True)
+
+
+@pytest.mark.parametrize(
+    "secret_value",
+    [
+        "-----BEGIN PRIVATE KEY-----\nopaque\n-----END PRIVATE KEY-----",
+        "redis://user:password@redis.internal:6379/0",
+        "Authorization: Bearer opaque-token",
+        "Bearer opaque-token",
+        "AKIAIOSFODNN7EXAMPLE",
+    ],
+)
+def test_legacy_secret_walk_rejects_secret_values_under_innocent_keys(
+    secret_value: str,
+) -> None:
+    request = TrainingJobRequest(
+        job_id="job-1",
+        training_config={"data": {"metadata": [{"value": secret_value}]}},
+    )
+
+    with pytest.raises(
+        ValueError, match=r"inline secret value data\.metadata\.0\.value"
+    ):
+        request.resolve_training_config(allow_legacy_training_config=True)
 
 
 def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
@@ -38,6 +168,9 @@ def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
         {
             "protocol_version": "2.0",
             "job_id": "train-job-1",
+            "model_id": "model-1",
+            "version_id": "version-1",
+            "tenant_id": "tenant-1",
             "algorithm": {
                 "algorithm_key": "xgboost",
                 "hyper_params": {
@@ -53,7 +186,6 @@ def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
                 "port": 9000,
                 "database_name": "analytics",
                 "username": "reader",
-                "password": "***",
             },
             "data_query": {
                 "query": {
@@ -68,6 +200,12 @@ def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
             "target": {
                 "result_column": "label",
                 "task_type": "BINARY_CLASSIFICATION",
+            },
+            "feature_engineering": {
+                "default_missing_value_strategy": "NONE",
+                "default_outlier_strategy": "NONE",
+                "default_scaling_method": "NONE",
+                "default_encoding_method": "NONE",
             },
             "data_split": {
                 "train_ratio": 0.7,
@@ -97,11 +235,18 @@ def test_canonical_clickhouse_request_maps_to_xgboost_bundle_config() -> None:
         "test_size": 0.2,
         "seed": 7,
         "early_stopping_rounds": 9,
+        "split_strategy": "RANDOM",
+        "stratify": False,
     }
     assert config["ray"]["storage_path"] == (
         "s3://knova-models/tenant/model/version/_ray"
     )
-    assert config["output"] == {"bundle_uri": "s3://knova-models/tenant/model/version"}
+    assert config["output"] == {
+        "onnx_path": "s3://knova-models/tenant/model/version/model.onnx",
+        "metrics_path": "s3://knova-models/tenant/model/version/metrics.json",
+        "onnx_opset": 12,
+        "onnx_optional": False,
+    }
 
 
 def test_canonical_request_requires_fields_needed_before_ray_submission() -> None:
@@ -109,8 +254,17 @@ def test_canonical_request_requires_fields_needed_before_ray_submission() -> Non
         TrainingJobRequest.model_validate(
             {
                 "job_id": "job-1",
-                "features": [{"result_column": "x1"}],
+                "model_id": "model-1",
+                "version_id": "version-1",
+                "tenant_id": "tenant-1",
+                "features": [{"feature_id": "f1", "result_column": "x1"}],
                 "target": {"result_column": "label"},
+                "feature_engineering": {
+                    "default_missing_value_strategy": "NONE",
+                    "default_outlier_strategy": "NONE",
+                    "default_scaling_method": "NONE",
+                    "default_encoding_method": "NONE",
+                },
                 "storage_context": {
                     "type": "local",
                     "prefix": "/tmp/bundles/",

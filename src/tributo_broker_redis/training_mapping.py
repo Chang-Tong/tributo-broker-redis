@@ -22,6 +22,13 @@ _CONTROL_HYPERPARAMS = {
 }
 _SIMPLE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HIVE_SHARD_MODES = frozenset({"auto", "hash", "offset"})
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"[a-z][a-z0-9+.-]*://[^/@\s]+@", re.IGNORECASE),
+    re.compile(r"\bauthorization\s*[:=]\s*(?:bearer|basic)\s+\S+", re.IGNORECASE),
+    re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+)
 
 
 def _required(value: Any, name: str) -> Any:
@@ -205,6 +212,13 @@ def _data_config(request: TrainingJobRequest) -> dict[str, Any]:
         for feature in request.features
         if feature.feature_id
     }
+    entity_key = request.data_query.entity_key if request.data_query else None
+    if entity_key is not None:
+        data["entity_key_column"] = entity_key.result_column
+    balance = request.data_sampling.class_balance if request.data_sampling else None
+    if balance is not None and balance.strategy.upper() == "CUSTOM_AMOUNT":
+        data["class_balance_strategy"] = "CUSTOM_AMOUNT"
+        data["class_amounts"] = dict(balance.class_amounts or {})
     return data
 
 
@@ -253,16 +267,23 @@ def _training_config(request: TrainingJobRequest) -> dict[str, Any]:
     split = request.data_split
     if split.validation_ratio + split.test_ratio >= 1.0:
         raise ValueError("validation_ratio + test_ratio must be less than 1")
+    configured_rounds = hyper_params.get("num_rounds", hyper_params.get("n_estimators"))
     config: dict[str, Any] = {
-        "num_rounds": hyper_params.get(
-            "num_rounds", hyper_params.get("n_estimators", 100)
+        "num_rounds": (
+            configured_rounds
+            if configured_rounds is not None
+            else min(100, request.resource_limits.max_epochs)
         ),
         "val_size": split.validation_ratio,
         "test_size": split.test_ratio,
         "seed": hyper_params.get(
             "seed", split.random_seed if split.random_seed is not None else 42
         ),
+        "split_strategy": split.strategy.upper(),
+        "stratify": split.stratify,
     }
+    if split.order_column is not None:
+        config["order_column"] = split.order_column
     early_stopping = hyper_params.get(
         "early_stopping_rounds",
         request.resource_limits.early_stopping_patience,
@@ -302,7 +323,24 @@ def _bundle_uri(request: TrainingJobRequest) -> str:
 
 
 def _output_config(request: TrainingJobRequest) -> dict[str, Any]:
-    return {"bundle_uri": _bundle_uri(request)}
+    bundle_uri = _bundle_uri(request)
+    return {
+        "onnx_path": f"{bundle_uri}/model.onnx",
+        "metrics_path": f"{bundle_uri}/metrics.json",
+        "onnx_opset": 12,
+        "onnx_optional": False,
+    }
+
+
+def _evaluation_config(request: TrainingJobRequest) -> dict[str, Any]:
+    artifacts = request.evaluation.artifacts
+    return {
+        "enabled": request.evaluation.enabled,
+        "roc_curve": artifacts.roc_curve,
+        "threshold_analysis": artifacts.threshold_analysis,
+        "confusion_matrix": artifacts.confusion_matrix,
+        "feature_importance": artifacts.feature_importance,
+    }
 
 
 def build_training_config_from_request(
@@ -320,16 +358,100 @@ def build_training_config_from_request(
         "training": _training_config(request),
         "ray": _ray_config(request),
         "output": _output_config(request),
+        "evaluation": _evaluation_config(request),
     }
 
 
-def resolve_training_config(request: TrainingJobRequest) -> dict[str, Any]:
-    """Preserve the legacy override or validate a canonical derived config."""
+def _validate_legacy_config(config: dict[str, Any]) -> None:
+    allowed_sections = {"data", "model", "training", "ray", "output", "evaluation"}
+    unknown = set(config) - allowed_sections
+    if unknown:
+        fields = ", ".join(sorted(map(str, unknown)))
+        raise ValueError(
+            f"training_config cannot override identity/broker/runtime fields: {fields}"
+        )
+
+    forbidden_control_keys = {
+        "broker",
+        "broker_config",
+        "execution_context",
+        "env_vars",
+        "identity",
+        "job_id",
+        "password_env",
+        "run_id",
+        "submission_id",
+    }
+    sensitive_fragments = (
+        "apikey",
+        "authorization",
+        "password",
+        "privatekey",
+        "secret",
+        "token",
+    )
+
+    def normalize_key(value: object) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, str) and any(
+            pattern.search(value) for pattern in _SECRET_VALUE_PATTERNS
+        ):
+            raise ValueError(
+                f"training_config cannot contain inline secret value {path}"
+            )
+        if isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                walk(child, f"{path}.{index}" if path else str(index))
+            return
+        if not isinstance(value, dict):
+            return
+        for raw_key, child in value.items():
+            key = normalize_key(raw_key)
+            child_path = f"{path}.{raw_key}" if path else str(raw_key)
+            if key.startswith("tributo") or key in {
+                normalize_key(field) for field in forbidden_control_keys
+            }:
+                raise ValueError(
+                    "training_config cannot override identity/broker/runtime field "
+                    f"{child_path}"
+                )
+            if (
+                any(fragment in key for fragment in sensitive_fragments)
+                and child not in (None, "")
+                and not key.endswith(("env", "envvar", "ref"))
+            ):
+                raise ValueError(
+                    f"training_config cannot contain inline secret field {child_path}"
+                )
+            walk(child, child_path)
+
+    walk(config, "")
+
+
+def resolve_training_config(
+    request: TrainingJobRequest,
+    *,
+    allow_legacy_training_config: bool = False,
+) -> dict[str, Any]:
+    """Build canonical config; legacy passthrough is opt-in and constrained."""
     if request.training_config is not None:
+        if not allow_legacy_training_config:
+            raise ValueError(
+                "training_config is legacy and disabled; set "
+                "allow_legacy_training_config=true in Provider config to allow it"
+            )
         if not request.training_config:
             raise ValueError("training_config must be a non-empty object")
         config = dict(request.training_config)
+        _validate_legacy_config(config)
     else:
+        # Keep direct callers as safe as the Redis runtime: canonical requests
+        # can never bypass capability or credential gates.
+        from tributo_broker_redis.capabilities import validate_supported_capabilities
+
+        validate_supported_capabilities(request)
         config = build_training_config_from_request(request)
 
     from tributo.training.xgboost_trainer import XGBoostTrainingConfig

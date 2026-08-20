@@ -11,7 +11,7 @@ from tributo.integrations.broker import JobResult
 
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.reporter import RedisEventReporter
-from tributo_broker_redis.run_training import _emit_history, _result_from_summary
+from tributo_broker_redis.run_training import _result_from_summary
 
 
 def test_reporter_uses_knova_two_field_envelope() -> None:
@@ -22,6 +22,15 @@ def test_reporter_uses_knova_two_field_envelope() -> None:
     assert stream == "knova:training:events:job-1"
     assert set(values) == {"job_id", "payload"}
     assert '"event_type":"PHASE"' in values["payload"]
+    assert json.loads(values["payload"])["message"] == "Training job queued"
+
+
+def test_reporter_maps_multiclass_logloss_to_loss() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+    reporter.report_metrics("job-1", {"train-mlogloss": 0.25}, 0.5)
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert event["metrics"] == [{"metric_name": "loss", "train": 0.25}]
 
 
 def test_reporter_retries_and_does_not_raise_when_redis_is_down() -> None:
@@ -67,7 +76,7 @@ def test_invalid_job_id_uses_dedicated_stream_without_sentinel_identity() -> Non
     )
     stream, values = client.xadd.call_args.args[:2]
     assert stream == config.invalid_event_stream_key
-    assert "job_id" not in values
+    assert values["job_id"] == ""
     assert json.loads(values["payload"])["job_id"] is None
     assert json.loads(values["payload"])["delivery_id"] == "7-0"
 
@@ -137,6 +146,8 @@ def test_reporter_publishes_log_metrics_and_completion_fields() -> None:
         "COMPLETED",
     ]
     assert events[0]["level"] == "info"
+    assert events[1]["metrics"] == [{"metric_name": "loss", "eval": 0.5}]
+    assert events[1]["current_round"] == 0
     completed = events[-1]
     assert completed["bundle_id"] == "bundle-1"
     assert completed["bundle_uri"] == "/models/bundle-1"
@@ -188,6 +199,69 @@ def test_reporter_rejects_invalid_log_level_without_publishing() -> None:
     client.xadd.assert_not_called()
 
 
+def test_reporter_maps_train_and_validation_metrics_to_process_metrics() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_metrics(
+        "job-1",
+        {"round": 25.0, "train-logloss": 0.4, "val-logloss": 0.5},
+        0.25,
+    )
+
+    stream, fields = client.xadd.call_args.args[:2]
+    assert stream == "knova:training:events:job-1"
+    assert set(fields) == {"job_id", "payload"}
+    event = json.loads(fields["payload"])
+    assert event["current_round"] == 25
+    assert event["total_rounds"] == 100
+    assert event["metrics"] == [{"metric_name": "loss", "train": 0.4, "eval": 0.5}]
+
+
+def test_reporter_converts_xgboost_error_rate_to_accuracy_for_both_scopes() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_metrics("job-1", {"train-error": 0.25, "val-error": 0.4}, 0.5)
+
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert event["metrics"] == [{"metric_name": "accuracy", "train": 0.75, "eval": 0.6}]
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1])
+def test_reporter_rejects_out_of_range_xgboost_error_rate(value: float) -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    with pytest.raises(ValueError, match="error rate must be in"):
+        reporter.report_metrics("job-1", {"train-error": value}, 0.5)
+
+    client.xadd.assert_not_called()
+
+
+def test_reporter_redacts_log_messages_before_publish() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_log(
+        "job-1", "failed redis://user:secret@redis password=hunter2", "error"
+    )
+
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert "secret" not in event["message"]
+    assert "hunter2" not in event["message"]
+
+
+def test_reporter_rejects_non_finite_metrics_without_publishing() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    with pytest.raises(ValueError, match="must be finite"):
+        reporter.report_metrics("job-1", {"train-loss": float("nan")}, 0.5)
+
+    client.xadd.assert_not_called()
+
+
 def test_reporter_publishes_cancelled_event() -> None:
     client = MagicMock()
     reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
@@ -195,26 +269,6 @@ def test_reporter_publishes_cancelled_event() -> None:
     event = json.loads(client.xadd.call_args.args[1]["payload"])
     assert event["event_type"] == "CANCELLED"
     assert event["phase"] == "TRAINING"
-
-
-def test_training_history_replays_nested_metrics() -> None:
-    reporter = MagicMock()
-    _emit_history(
-        reporter,
-        "job-1",
-        {
-            "metrics": {
-                "train-logloss_history": [0.8, 0.4],
-                "train-logloss": 0.4,
-            }
-        },
-    )
-    assert reporter.report_metrics.call_count == 2
-    assert reporter.report_metrics.call_args_list[0].args == (
-        "job-1",
-        {"train-logloss": 0.8},
-        0.5,
-    )
 
 
 def test_training_summary_bridges_bundle_and_metric_fields() -> None:

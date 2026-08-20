@@ -17,6 +17,7 @@
   "max_stream_length": 1000,
   "max_payload_bytes": 1048576,
   "max_event_bytes": 1048576,
+  "allow_legacy_training_config": false,
   "ray_dashboard_url": "http://ray-head:8265",
   "extra_py_modules": [],
   "runtime_pip_packages": [
