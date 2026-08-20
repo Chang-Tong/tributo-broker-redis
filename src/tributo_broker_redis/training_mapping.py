@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from tributo_broker_redis.protocol import TrainingJobRequest
@@ -19,12 +20,79 @@ _CONTROL_HYPERPARAMS = {
     "seed",
     "use_gpu",
 }
+_SIMPLE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HIVE_SHARD_MODES = frozenset({"auto", "hash", "offset"})
 
 
 def _required(value: Any, name: str) -> Any:
     if value is None or value == "" or value == []:
         raise ValueError(f"{name} is required for canonical training requests")
     return value
+
+
+def _integer(
+    value: Any,
+    name: str,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+    allow_minus_one: bool = False,
+) -> int:
+    """Parse a protocol integer while retaining its canonical field path."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} must be an integer")
+    if isinstance(value, str) and value.strip() != str(parsed):
+        raise ValueError(f"{name} must be an integer")
+    if allow_minus_one and parsed == -1:
+        return parsed
+    if parsed < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return parsed
+
+
+def _port(value: Any) -> int:
+    return _integer(value, "datasource.port", maximum=65535)
+
+
+def _sql_identifier(value: Any, name: str) -> str:
+    """Validate unquoted, single-part SQL identifiers at the protocol boundary."""
+    if not isinstance(value, str) or not _SIMPLE_SQL_IDENTIFIER.fullmatch(value):
+        raise ValueError(f"{name} must be a simple SQL identifier")
+    return value
+
+
+def _hive_shard_mode(value: Any) -> str:
+    name = "datasource.properties.shard_mode"
+    if not isinstance(value, str) or value not in _HIVE_SHARD_MODES:
+        allowed = ", ".join(sorted(_HIVE_SHARD_MODES))
+        raise ValueError(f"{name} must be one of: {allowed}")
+    return value
+
+
+def _optional_integer(
+    properties: dict[str, Any],
+    key: str,
+    *,
+    minimum: int = 1,
+    allow_minus_one: bool = False,
+) -> int | None:
+    value = properties.get(key)
+    if value is None:
+        return None
+    return _integer(
+        value,
+        f"datasource.properties.{key}",
+        minimum=minimum,
+        allow_minus_one=allow_minus_one,
+    )
 
 
 def _data_config(request: TrainingJobRequest) -> dict[str, Any]:
@@ -50,11 +118,12 @@ def _data_config(request: TrainingJobRequest) -> dict[str, Any]:
             "s3": s3,
         }
     elif data_type == "CLICKHOUSE":
+        properties = datasource.properties
         query = request.data_query.query if request.data_query else None
         data = {
             "type": "clickhouse",
             "ch_host": _required(datasource.host, "datasource.host"),
-            "ch_port": datasource.port,
+            "ch_port": _port(datasource.port),
             "ch_database": _required(
                 datasource.database_name, "datasource.database_name"
             ),
@@ -63,6 +132,58 @@ def _data_config(request: TrainingJobRequest) -> dict[str, Any]:
             "ch_sql": _required(query.sql if query else None, "data_query.query.sql"),
             "ch_sql_params": query.params if query else {},
         }
+        sort_key = properties.get("sort_key")
+        if sort_key is not None:
+            data["ch_sort_key"] = _sql_identifier(
+                sort_key,
+                "datasource.properties.sort_key",
+            )
+        parallelism = _optional_integer(
+            properties,
+            "parallelism",
+            allow_minus_one=True,
+        )
+        if parallelism is not None:
+            data["ch_parallelism"] = parallelism
+    elif data_type == "HIVE":
+        properties = datasource.properties
+        query = request.data_query.query if request.data_query else None
+        data = {
+            "type": "hive",
+            "hive_host": _required(datasource.host, "datasource.host"),
+            "hive_port": _port(
+                datasource.port if "port" in datasource.model_fields_set else 10000
+            ),
+            "hive_database": _required(
+                datasource.database_name, "datasource.database_name"
+            ),
+            "hive_user": datasource.username or "default",
+            "hive_password": datasource.password or "",
+            "hive_sql": _required(query.sql if query else None, "data_query.query.sql"),
+            "hive_sql_params": query.params if query else {},
+            "hive_hash_shards": _optional_integer(properties, "hash_shards") or 64,
+        }
+        optional_integer_fields = {
+            "batch_size": "hive_batch_size",
+            "parallelism": "hive_parallelism",
+        }
+        for property_name, core_name in optional_integer_fields.items():
+            value = _optional_integer(
+                properties,
+                property_name,
+                allow_minus_one=property_name == "parallelism",
+            )
+            if value is not None:
+                data[core_name] = value
+        shard_mode = properties.get("shard_mode")
+        if shard_mode is not None:
+            data["hive_shard_mode"] = _hive_shard_mode(shard_mode)
+        hash_column = properties.get("hash_column")
+        if hash_column is not None:
+            data["hive_hash_column"] = _sql_identifier(
+                hash_column,
+                "datasource.properties.hash_column",
+            )
     elif data_type in {"CSV", "LOCAL"}:
         properties = datasource.properties
         data = {
