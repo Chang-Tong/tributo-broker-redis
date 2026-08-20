@@ -6,11 +6,11 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
-from pathlib import Path
+from collections.abc import Mapping, Sequence, Set
 from typing import Any
 
 from tributo.integrations.broker import JobResult
+from tributo.training.execution_context import TrainingCancelledError
 
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.redis_client import create_redis_client
@@ -117,6 +117,53 @@ def _worker_job_identity() -> tuple[str | None, str | None]:
     return os.environ.get("RAY_JOB_ID") or submission_id, submission_id
 
 
+def _is_training_cancelled_error(error: BaseException) -> bool:
+    """Recognize Core cancellation through Ray Train's nested error containers."""
+    pending: list[object] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, TrainingCancelledError):
+            return True
+
+        if isinstance(current, Mapping):
+            pending.extend(current.values())
+            continue
+        if isinstance(current, (Sequence, Set)) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
+            pending.extend(current)
+            continue
+
+        if isinstance(current, BaseException):
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if not current.__suppress_context__ and current.__context__ is not None:
+                pending.append(current.__context__)
+
+        # Ray Train v2 exposes nested failures on these public/private wrapper
+        # attributes rather than through Python exception chaining.
+        for attribute in (
+            "cause",
+            "worker_failures",
+            "controller_failure",
+            "health_check_failure",
+            "exceptions",
+            "exception",
+            "_base_exc",
+        ):
+            try:
+                candidate = getattr(current, attribute)
+            except (AttributeError, RuntimeError):
+                continue
+            if candidate is not current:
+                pending.append(candidate)
+    return False
+
+
 def main() -> int:
     request_data = _read_json_env("TRIBUTO_BROKER_REQUEST_JSON")
     training_config = _read_json_env("TRIBUTO_TRAINING_CONFIG_JSON")
@@ -140,8 +187,7 @@ def main() -> int:
                 "_tributo_execution_context": json.loads(
                     os.environ.get("TRIBUTO_EXECUTION_CONTEXT", "{}")
                 ),
-            },
-            project_root_path=Path.cwd(),
+            }
         )
         if not isinstance(summary, dict):
             summary = {"result": summary}
@@ -162,6 +208,10 @@ def main() -> int:
         reporter.report_completed(job_id, result)
         return 0
     except Exception as exc:
+        if _is_training_cancelled_error(exc):
+            logger.info("Redis broker training job cancelled: job_id=%s", job_id)
+            reporter.report_cancelled(job_id, "TRAINING")
+            return 0
         logger.exception("Redis broker training job failed: job_id=%s", job_id)
         reporter.report_failed_with_code(job_id, str(exc), type(exc).__name__)
         return 1

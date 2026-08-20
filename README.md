@@ -16,7 +16,7 @@ consumer. The same provider wheel must be available to the Ray Job runtime
 when the job entrypoint or worker-side cancellation checker is used.
 
 ```bash
-pip install 'tributo>=1.0,<2.0' tributo-broker-redis
+pip install 'tributo>=1.1,<2.0' tributo-broker-redis
 tributo broker list
 ```
 
@@ -72,6 +72,9 @@ Discovery is fail-open for ordinary `tributo` commands. An explicitly selected
 missing, filtered, or invalid provider fails closed. Redis connection failure
 is logged and contained by the Core BrokerRunner; task processing resumes via
 bounded reconnect and Redis pending recovery.
+
+Tributo 1.1 is the minimum supported Core release because it introduces Broker
+API v1, stable Ray submission identity, and worker execution context support.
 
 ## Delivery semantics
 

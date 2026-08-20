@@ -136,10 +136,56 @@ def test_reporter_publishes_log_metrics_and_completion_fields() -> None:
         "METRICS",
         "COMPLETED",
     ]
+    assert events[0]["level"] == "info"
     completed = events[-1]
     assert completed["bundle_id"] == "bundle-1"
     assert completed["bundle_uri"] == "/models/bundle-1"
     assert completed["artifact_refs"] == [{"name": "onnx-model", "format": "onnx"}]
+
+
+def test_reporter_normalizes_log_level_to_lowercase() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_log("job-1", "warning", "WaRnInG")
+
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert event["event_type"] == "LOG"
+    assert event["level"] == "warning"
+
+
+def test_reporter_maps_warn_alias_to_warning() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_log("job-1", "warning", "warn")
+
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert event["level"] == "warning"
+
+
+@pytest.mark.parametrize(
+    "level",
+    ["debug", "info", "warning", "error", "success"],
+)
+def test_reporter_accepts_wire_log_levels(level: str) -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    reporter.report_log("job-1", "message", level.upper())
+
+    event = json.loads(client.xadd.call_args.args[1]["payload"])
+    assert event["level"] == level
+
+
+def test_reporter_rejects_invalid_log_level_without_publishing() -> None:
+    client = MagicMock()
+    reporter = RedisEventReporter(client, RedisBrokerConfig(), "job-1")
+
+    with pytest.raises(ValueError, match="Unsupported broker log level"):
+        reporter.report_log("job-1", "message", "critical")
+
+    client.xadd.assert_not_called()
 
 
 def test_reporter_publishes_cancelled_event() -> None:

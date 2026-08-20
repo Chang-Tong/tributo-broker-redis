@@ -15,6 +15,8 @@ from tributo_broker_redis.protocol import event_payload
 
 logger = logging.getLogger(__name__)
 
+_LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "success"})
+
 
 class RedisEventReporter(EventReporter):
     """Publish KnoVa-compatible events with bounded, fail-open retries.
@@ -137,7 +139,19 @@ class RedisEventReporter(EventReporter):
         self._publish(job_id, "PHASE", {"phase": phase})
 
     def report_log(self, job_id: str, message: str, level: str = "INFO") -> None:
-        self._publish(job_id, "LOG", {"message": message, "level": level})
+        normalized_level = level.strip().lower()
+        if normalized_level == "warn":
+            normalized_level = "warning"
+        if normalized_level not in _LOG_LEVELS:
+            supported = ", ".join(sorted(_LOG_LEVELS))
+            raise ValueError(
+                f"Unsupported broker log level {level!r}; expected one of: {supported}"
+            )
+        self._publish(
+            job_id,
+            "LOG",
+            {"message": message, "level": normalized_level},
+        )
 
     def report_metrics(
         self,

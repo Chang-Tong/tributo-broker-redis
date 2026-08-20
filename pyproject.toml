@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "tributo>=1.0,<2.0",
+    "tributo>=1.1,<2.0",
     "redis>=6.0,<8.0",
     "pydantic>=2.0,<3.0",
 ]
