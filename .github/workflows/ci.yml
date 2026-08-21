@@ -5,10 +5,10 @@ on:
   pull_request:
 
 env:
-  # Keep CI on the same Broker API branch used by the local wheel IT until
-  # that Core line is published to the package index.
-  TRIBUTO_CORE_REPOSITORY: jiangxt2/Tributo
-  TRIBUTO_CORE_REF: feat/redis-stream-integration
+  # Pin the exact Core revision exercised by this provider branch's wheel-only
+  # Redis/Ray E2E suite until the compatible Core line is released.
+  TRIBUTO_CORE_REPOSITORY: Chang-Tong/Tributo
+  TRIBUTO_CORE_REF: 8a08572a47f3017519aa4224db22a27c3243bb36
 
 jobs:
   unit:
