@@ -742,7 +742,7 @@ def test_late_cancel_does_not_stop_a_terminal_operation(
     assert active.get(item.operation_id) is None
 
 
-def test_external_stopped_submission_is_removed_without_cancelled_event(
+def test_external_stopped_submission_publishes_failed_terminal_event(
     config: RedisBrokerConfig, fake_redis: FakeRedis
 ) -> None:
     submission = RayJobSubmission(
@@ -775,7 +775,64 @@ def test_external_stopped_submission_is_removed_without_cancelled_event(
     watcher.check_once()
 
     assert active.get(item.operation_id) is None
-    assert item.channel.event_stream_key(item.operation_id) not in fake_redis.events
+    event = json.loads(
+        fake_redis.events[item.channel.event_stream_key(item.operation_id)][-1][
+            "payload"
+        ]
+    )
+    assert event["event_type"] == "FAILED"
+    assert event["payload"]["error_code"] == "RAY_JOB_STOPPED"
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        ("FAILED", "RAY_JOB_FAILED"),
+        ("SUCCEEDED", "TERMINAL_EVENT_MISSING"),
+    ],
+)
+def test_terminal_ray_status_without_driver_event_publishes_failed(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    status: str,
+    code: str,
+) -> None:
+    submission = RayJobSubmission(
+        run_id="run-missing-terminal",
+        attempt_id="attempt-1",
+        submission_id="submission-missing-terminal",
+    )
+    item = ActiveSubmission(
+        operation_id="operation-missing-terminal",
+        operation_type="training",
+        execution_profile="single_worker",
+        run_id=submission.run_id,
+        channel=config.channels.training,
+        submission=submission,
+    )
+    active = ActiveSubmissionMap()
+    active.put(item)
+    watcher = CancelWatcher(
+        fake_redis,
+        active,
+        dashboard_url="http://ray:8265",
+        interval_seconds=1,
+        max_event_bytes=1024 * 1024,
+        max_stream_length=100,
+        status_getter=lambda *_args, **_kwargs: status,
+        stopper=lambda *_args, **_kwargs: pytest.fail("stop must not be requested"),
+    )
+
+    watcher.check_once()
+
+    event = json.loads(
+        fake_redis.events[item.channel.event_stream_key(item.operation_id)][-1][
+            "payload"
+        ]
+    )
+    assert event["event_type"] == "FAILED"
+    assert event["payload"]["error_code"] == code
+    assert active.get(item.operation_id) is None
 
 
 def test_old_attempt_terminal_event_does_not_hide_active_submission(
