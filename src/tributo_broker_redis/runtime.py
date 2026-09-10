@@ -160,6 +160,8 @@ class RedisBrokerRuntime(BrokerRuntime):
             execution_profile = metadata.get("tributo.execution_profile")
             run_id = metadata.get("tributo.run_id")
             attempt_id = metadata.get("tributo.attempt_id")
+            driver_entrypoint = metadata.get("tributo.driver_entrypoint")
+            task_stream = metadata.get("tributo.task_stream")
             submission_id = getattr(job, "submission_id", None)
             required = (
                 operation_id,
@@ -167,17 +169,22 @@ class RedisBrokerRuntime(BrokerRuntime):
                 execution_profile,
                 run_id,
                 attempt_id,
+                driver_entrypoint,
+                task_stream,
                 submission_id,
             )
             if (
                 not all(isinstance(value, str) and value for value in required)
                 or operation_type not in {"training", "batch_inference"}
                 or execution_profile not in {"single_worker", "distributed"}
+                or driver_entrypoint != self._driver_entrypoint
             ):
                 continue
             channel = self.config.channels.for_operation(
                 cast(OperationType, operation_type)
             )
+            if task_stream != channel.task_stream_key:
+                continue
             self.active_submissions.put(
                 ActiveSubmission(
                     operation_id=operation_id,
@@ -408,6 +415,8 @@ class RedisBrokerRuntime(BrokerRuntime):
                     "tributo.protocol_profile": request.protocol_profile,
                     "tributo.run_id": run_id,
                     "tributo.attempt_id": request.attempt_id,
+                    "tributo.driver_entrypoint": self._driver_entrypoint,
+                    "tributo.task_stream": channel.task_stream_key,
                 },
                 request_digest=request.request_digest,
                 entrypoint_num_cpus=self.config.execution.entrypoint_num_cpus,

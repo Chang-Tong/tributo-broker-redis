@@ -912,6 +912,10 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
             "tributo.protocol_profile": "tributo-generic-v1",
             "tributo.run_id": "run-recovered",
             "tributo.attempt_id": "attempt-2",
+            "tributo.driver_entrypoint": (
+                "python -m tributo_broker_redis.execution_driver"
+            ),
+            "tributo.task_stream": config.channels.training.task_stream_key,
             "tributo.request_digest": "a" * 64,
         },
     )
