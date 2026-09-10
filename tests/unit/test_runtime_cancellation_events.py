@@ -124,9 +124,7 @@ def test_runtime_accepts_thin_protocol_and_driver_hooks(
     )
 
     assert runtime.run_once(timeout_ms=0) is True
-    assert parsed_payloads == [
-        '{"protocol_version":"2.0","job_id":"knova-training-1"}'
-    ]
+    assert parsed_payloads == ['{"protocol_version":"2.0","job_id":"knova-training-1"}']
     assert submitter.calls[0][0] == "python -m tributo_knova.execution_driver"
     assert reporter_calls[-1]["operation_id"] == operation_id
     assert fake_redis.acked == [("tasks:training", "group:training", "1-0")]
