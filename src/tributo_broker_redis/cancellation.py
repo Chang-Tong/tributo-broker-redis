@@ -65,6 +65,7 @@ class CancelWatcher:
         max_stream_length: int,
         status_getter: Callable[..., str] = get_ray_job_status,
         stopper: Callable[..., bool] = stop_ray_job,
+        reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
     ) -> None:
         self._redis = redis_client
         self._active = active
@@ -74,6 +75,7 @@ class CancelWatcher:
         self._max_stream_length = max_stream_length
         self._status_getter = status_getter
         self._stopper = stopper
+        self._reporter_factory = reporter_factory
         self._stop_requested: set[str] = set()
         self._closed = threading.Event()
         self._thread: threading.Thread | None = None
@@ -157,7 +159,7 @@ class CancelWatcher:
         )
 
     def _report_cancelled(self, item: ActiveSubmission) -> None:
-        reporter = RedisEventReporter(
+        reporter = self._reporter_factory(
             self._redis,
             event_stream_prefix=item.channel.event_stream_prefix,
             operation_id=item.operation_id,

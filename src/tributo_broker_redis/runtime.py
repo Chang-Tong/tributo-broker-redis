@@ -81,6 +81,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             prepare_operation
         ),
         driver_entrypoint: str = _DEFAULT_DRIVER_ENTRYPOINT,
+        reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
     ) -> None:
         if not driver_entrypoint.strip():
             raise ValueError("driver_entrypoint must not be empty")
@@ -89,6 +90,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         self._request_parser = request_parser
         self._operation_preparer = operation_preparer
         self._driver_entrypoint = driver_entrypoint
+        self._reporter_factory = reporter_factory
         validate_execution_environment(config)
         self._redis = redis_client or create_redis_client(config)
         self._consumers: dict[OperationType, RedisTaskConsumer] = {
@@ -108,6 +110,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             interval_seconds=config.execution.cancel_poll_interval_seconds,
             max_event_bytes=config.transport.max_event_bytes,
             max_stream_length=config.transport.max_stream_length,
+            reporter_factory=reporter_factory,
         )
         self._next_channel = 0
         self._closed = False
@@ -137,7 +140,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         submission: RayJobSubmission | None = None,
     ) -> RedisEventReporter:
         channel = self.config.channels.for_operation(operation_type)
-        return RedisEventReporter(
+        return self._reporter_factory(
             self._redis,
             event_stream_prefix=channel.event_stream_prefix,
             operation_id=operation_id,

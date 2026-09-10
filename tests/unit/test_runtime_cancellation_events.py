@@ -80,6 +80,12 @@ def test_runtime_accepts_thin_protocol_and_driver_hooks(
         )
     ]
     parsed_payloads: list[str] = []
+    reporter_calls: list[dict[str, Any]] = []
+
+    class HookedReporter(RedisEventReporter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            reporter_calls.append(dict(kwargs))
+            super().__init__(*args, **kwargs)
 
     def parse_knova(
         raw_payload: str,
@@ -113,6 +119,7 @@ def test_runtime_accepts_thin_protocol_and_driver_hooks(
         request_parser=parse_knova,
         operation_preparer=prepare_knova,
         driver_entrypoint="python -m tributo_knova.execution_driver",
+        reporter_factory=HookedReporter,
     )
 
     assert runtime.run_once(timeout_ms=0) is True
@@ -120,6 +127,7 @@ def test_runtime_accepts_thin_protocol_and_driver_hooks(
         '{"protocol_version":"2.0","job_id":"knova-training-1"}'
     ]
     assert submitter.calls[0][0] == "python -m tributo_knova.execution_driver"
+    assert reporter_calls[-1]["operation_id"] == operation_id
     assert fake_redis.acked == [("tasks:training", "group:training", "1-0")]
 
 
