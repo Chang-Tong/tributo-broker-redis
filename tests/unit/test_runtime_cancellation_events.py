@@ -17,6 +17,7 @@ from tributo_broker_redis.cancellation import (
     CancelWatcher,
 )
 from tributo_broker_redis.config import OperationType, RedisBrokerConfig
+from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.execution_driver import (
     CredentialUnavailable,
     _load_driver_input,
@@ -887,3 +888,47 @@ def test_old_attempt_terminal_event_does_not_hide_active_submission(
 
     assert stopped == [current.submission_id]
     assert active.get(item.operation_id) is item
+
+
+def test_start_recovers_pending_deliveries_and_active_ray_jobs(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovered: list[str] = []
+    monkeypatch.setattr(
+        RedisTaskConsumer,
+        "recover_pending",
+        lambda self: recovered.append(self.operation_type) or 0,
+    )
+    job = SimpleNamespace(
+        status="RUNNING",
+        submission_id="submission-recovered",
+        job_id="ray-job-recovered",
+        metadata={
+            "tributo.operation_id": "operation-recovered",
+            "tributo.operation_type": "training",
+            "tributo.execution_profile": "distributed",
+            "tributo.protocol_profile": "tributo-generic-v1",
+            "tributo.run_id": "run-recovered",
+            "tributo.attempt_id": "attempt-2",
+            "tributo.request_digest": "a" * 64,
+        },
+    )
+    runtime = RedisBrokerRuntime(
+        config,
+        redis_client=fake_redis,
+        start_cancel_watcher=False,
+        job_lister=lambda _url: [job],
+    )
+    monkeypatch.setattr(runtime._cancel_watcher, "start", lambda: None)
+
+    runtime.start()
+    runtime.start()
+
+    assert sorted(recovered) == ["batch_inference", "training"]
+    item = runtime.active_submissions.get("operation-recovered")
+    assert item is not None
+    assert item.run_id == "run-recovered"
+    assert item.submission.attempt_id == "attempt-2"
+    assert item.submission.request_digest == "a" * 64

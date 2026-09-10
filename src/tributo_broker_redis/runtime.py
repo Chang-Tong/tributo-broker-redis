@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from ray.job_submission import JobSubmissionClient
 from tributo.integrations.broker import (
     BrokerError,
     BrokerRuntime,
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 _DRIVER_ENV = "TRIBUTO_REDIS_DRIVER_INPUT_B64"
 _MAX_DRIVER_INPUT_BYTES = 64 * 1024
 _DEFAULT_DRIVER_ENTRYPOINT = "python -m tributo_broker_redis.execution_driver"
+_ACTIVE_RAY_STATUSES = frozenset({"PENDING", "RUNNING"})
+
+
+def _list_ray_jobs(dashboard_url: str) -> Iterable[Any]:
+    return JobSubmissionClient(dashboard_url).list_jobs()
 
 
 def validate_execution_environment(
@@ -82,6 +88,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         ),
         driver_entrypoint: str = _DEFAULT_DRIVER_ENTRYPOINT,
         reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
+        job_lister: Callable[[str], Iterable[Any]] = _list_ray_jobs,
     ) -> None:
         if not driver_entrypoint.strip():
             raise ValueError("driver_entrypoint must not be empty")
@@ -91,6 +98,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         self._operation_preparer = operation_preparer
         self._driver_entrypoint = driver_entrypoint
         self._reporter_factory = reporter_factory
+        self._job_lister = job_lister
         validate_execution_environment(config)
         self._redis = redis_client or create_redis_client(config)
         self._consumers: dict[OperationType, RedisTaskConsumer] = {
@@ -114,6 +122,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         )
         self._next_channel = 0
         self._closed = False
+        self._started = False
         if start_cancel_watcher:
             self._cancel_watcher.start()
 
@@ -127,7 +136,64 @@ class RedisBrokerRuntime(BrokerRuntime):
         return self._consumers
 
     def start(self) -> None:
+        if self._started:
+            return
+        for consumer in self._consumers.values():
+            consumer.recover_pending()
+        self._recover_active_submissions()
         self._cancel_watcher.start()
+        self._started = True
+
+    def _recover_active_submissions(self) -> None:
+        """Rebuild cancellation/watchdog state from credential-free Ray metadata."""
+        jobs = self._job_lister(self.config.execution.ray_dashboard_url)
+        for job in jobs:
+            raw_status = getattr(job, "status", "")
+            status = str(getattr(raw_status, "value", raw_status)).upper()
+            if status not in _ACTIVE_RAY_STATUSES:
+                continue
+            metadata = getattr(job, "metadata", None)
+            if not isinstance(metadata, Mapping):
+                continue
+            operation_id = metadata.get("tributo.operation_id")
+            operation_type = metadata.get("tributo.operation_type")
+            execution_profile = metadata.get("tributo.execution_profile")
+            run_id = metadata.get("tributo.run_id")
+            attempt_id = metadata.get("tributo.attempt_id")
+            submission_id = getattr(job, "submission_id", None)
+            required = (
+                operation_id,
+                operation_type,
+                execution_profile,
+                run_id,
+                attempt_id,
+                submission_id,
+            )
+            if (
+                not all(isinstance(value, str) and value for value in required)
+                or operation_type not in {"training", "batch_inference"}
+                or execution_profile not in {"single_worker", "distributed"}
+            ):
+                continue
+            channel = self.config.channels.for_operation(
+                cast(OperationType, operation_type)
+            )
+            self.active_submissions.put(
+                ActiveSubmission(
+                    operation_id=operation_id,
+                    operation_type=cast(OperationType, operation_type),
+                    execution_profile=cast(ExecutionProfile, execution_profile),
+                    run_id=run_id,
+                    channel=channel,
+                    submission=RayJobSubmission(
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                        submission_id=submission_id,
+                        ray_job_id=getattr(job, "job_id", None),
+                        request_digest=metadata.get("tributo.request_digest"),
+                    ),
+                )
+            )
 
     def _reporter(
         self,
@@ -340,6 +406,8 @@ class RedisBrokerRuntime(BrokerRuntime):
                     "tributo.operation_type": operation_type,
                     "tributo.execution_profile": request.execution_profile,
                     "tributo.protocol_profile": request.protocol_profile,
+                    "tributo.run_id": run_id,
+                    "tributo.attempt_id": request.attempt_id,
                 },
                 request_digest=request.request_digest,
                 entrypoint_num_cpus=self.config.execution.entrypoint_num_cpus,
