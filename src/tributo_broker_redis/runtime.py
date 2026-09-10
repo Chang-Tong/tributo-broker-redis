@@ -187,15 +187,15 @@ class RedisBrokerRuntime(BrokerRuntime):
                 continue
             self.active_submissions.put(
                 ActiveSubmission(
-                    operation_id=operation_id,
+                    operation_id=cast(str, operation_id),
                     operation_type=cast(OperationType, operation_type),
                     execution_profile=cast(ExecutionProfile, execution_profile),
-                    run_id=run_id,
+                    run_id=cast(str, run_id),
                     channel=channel,
                     submission=RayJobSubmission(
-                        run_id=run_id,
-                        attempt_id=attempt_id,
-                        submission_id=submission_id,
+                        run_id=cast(str, run_id),
+                        attempt_id=cast(str, attempt_id),
+                        submission_id=cast(str, submission_id),
                         ray_job_id=getattr(job, "job_id", None),
                         request_digest=metadata.get("tributo.request_digest"),
                     ),

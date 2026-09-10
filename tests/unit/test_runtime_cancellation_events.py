@@ -894,10 +894,15 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recovered: list[str] = []
+
+    def recover_pending(consumer: RedisTaskConsumer) -> int:
+        recovered.append(consumer.operation_type)
+        return 0
+
     monkeypatch.setattr(
         RedisTaskConsumer,
         "recover_pending",
-        lambda self: recovered.append(self.operation_type) or 0,
+        recover_pending,
     )
     job = SimpleNamespace(
         status="RUNNING",
