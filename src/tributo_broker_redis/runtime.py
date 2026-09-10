@@ -29,9 +29,14 @@ from tributo_broker_redis.config import (
     normalize_config,
 )
 from tributo_broker_redis.consumer import RedisTaskConsumer
-from tributo_broker_redis.operations import MappingFailure, prepare_operation
+from tributo_broker_redis.operations import (
+    MappingFailure,
+    PreparedOperation,
+    prepare_operation,
+)
 from tributo_broker_redis.protocol import (
     DriverInput,
+    GenericRequest,
     ProtocolFailure,
     parse_request,
 )
@@ -41,6 +46,7 @@ from tributo_broker_redis.reporter import RedisEventReporter
 logger = logging.getLogger(__name__)
 _DRIVER_ENV = "TRIBUTO_REDIS_DRIVER_INPUT_B64"
 _MAX_DRIVER_INPUT_BYTES = 64 * 1024
+_DEFAULT_DRIVER_ENTRYPOINT = "python -m tributo_broker_redis.execution_driver"
 
 
 def validate_execution_environment(
@@ -70,9 +76,19 @@ class RedisBrokerRuntime(BrokerRuntime):
         submitter: Callable[..., RayJobSubmission] = submit_ray_job,
         redis_client: Any | None = None,
         start_cancel_watcher: bool = False,
+        request_parser: Callable[..., GenericRequest] = parse_request,
+        operation_preparer: Callable[[GenericRequest], PreparedOperation] = (
+            prepare_operation
+        ),
+        driver_entrypoint: str = _DEFAULT_DRIVER_ENTRYPOINT,
     ) -> None:
+        if not driver_entrypoint.strip():
+            raise ValueError("driver_entrypoint must not be empty")
         self.config = config
         self._submitter = submitter
+        self._request_parser = request_parser
+        self._operation_preparer = operation_preparer
+        self._driver_entrypoint = driver_entrypoint
         validate_execution_environment(config)
         self._redis = redis_client or create_redis_client(config)
         self._consumers: dict[OperationType, RedisTaskConsumer] = {
@@ -213,7 +229,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 sanitized_message="payload must be a JSON string",
             )
         try:
-            request = parse_request(
+            request = self._request_parser(
                 raw,
                 outer_operation_id=outer_operation_id,
                 expected_operation_type=operation_type,
@@ -232,7 +248,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                     "UNSUPPORTED_EXECUTION_PROFILE",
                     "execution profile is disabled by provider configuration",
                 )
-            prepared = prepare_operation(request)
+            prepared = self._operation_preparer(request)
         except MappingFailure as exc:
             return self._invalid(
                 message,
@@ -300,7 +316,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         env_vars[_DRIVER_ENV] = encoded_driver_input
         try:
             submission = self._submitter(
-                "python -m tributo_broker_redis.execution_driver",
+                self._driver_entrypoint,
                 operation_namespace=namespace,
                 run_id=run_id,
                 attempt_id=request.attempt_id,

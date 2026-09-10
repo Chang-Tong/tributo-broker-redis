@@ -22,7 +22,8 @@ from tributo_broker_redis.execution_driver import (
     _load_driver_input,
     _resolve_credential_reference,
 )
-from tributo_broker_redis.protocol import DriverInput
+from tributo_broker_redis.operations import PreparedOperation
+from tributo_broker_redis.protocol import DriverInput, GenericRequest
 from tributo_broker_redis.reporter import RedisEventReporter, redact
 from tributo_broker_redis.runtime import RedisBrokerRuntime
 
@@ -62,6 +63,64 @@ class SubmissionRecorder:
             ray_job_id="ray-job-1",
             request_digest=kwargs["request_digest"],
         )
+
+
+def test_runtime_accepts_thin_protocol_and_driver_hooks(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+) -> None:
+    operation_id = "knova-training-1"
+    fake_redis.messages["tasks:training"] = [
+        (
+            "1-0",
+            {
+                "operation_id": operation_id,
+                "payload": '{"protocol_version":"2.0","job_id":"knova-training-1"}',
+            },
+        )
+    ]
+    parsed_payloads: list[str] = []
+
+    def parse_knova(
+        raw_payload: str,
+        *,
+        outer_operation_id: str,
+        expected_operation_type: OperationType,
+    ) -> GenericRequest:
+        parsed_payloads.append(raw_payload)
+        return GenericRequest(
+            protocol_profile="tributo-generic-v1",
+            protocol_version="1.0",
+            operation_id=outer_operation_id,
+            operation_type=expected_operation_type,
+            execution_profile="distributed",
+            run_id=outer_operation_id,
+            request_digest="d" * 64,
+            spec={"knova_request": {"job_id": outer_operation_id}},
+        )
+
+    def prepare_knova(request: GenericRequest) -> PreparedOperation:
+        return PreparedOperation(
+            operation_payload=dict(request.spec),
+            credential_ref=None,
+        )
+
+    submitter = SubmissionRecorder()
+    runtime = RedisBrokerRuntime(
+        config,
+        submitter=submitter,
+        redis_client=fake_redis,
+        request_parser=parse_knova,
+        operation_preparer=prepare_knova,
+        driver_entrypoint="python -m tributo_knova.execution_driver",
+    )
+
+    assert runtime.run_once(timeout_ms=0) is True
+    assert parsed_payloads == [
+        '{"protocol_version":"2.0","job_id":"knova-training-1"}'
+    ]
+    assert submitter.calls[0][0] == "python -m tributo_knova.execution_driver"
+    assert fake_redis.acked == [("tasks:training", "group:training", "1-0")]
 
 
 @pytest.mark.parametrize(
