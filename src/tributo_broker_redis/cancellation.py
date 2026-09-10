@@ -65,6 +65,7 @@ class CancelWatcher:
         max_stream_length: int,
         status_getter: Callable[..., str] = get_ray_job_status,
         stopper: Callable[..., bool] = stop_ray_job,
+        reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
     ) -> None:
         self._redis = redis_client
         self._active = active
@@ -74,6 +75,7 @@ class CancelWatcher:
         self._max_stream_length = max_stream_length
         self._status_getter = status_getter
         self._stopper = stopper
+        self._reporter_factory = reporter_factory
         self._stop_requested: set[str] = set()
         self._closed = threading.Event()
         self._thread: threading.Thread | None = None
@@ -104,12 +106,20 @@ class CancelWatcher:
                     dashboard_url=self._dashboard_url,
                 )
                 if status in {"SUCCEEDED", "FAILED"}:
+                    code = (
+                        "RAY_JOB_FAILED"
+                        if status == "FAILED"
+                        else "TERMINAL_EVENT_MISSING"
+                    )
+                    self._report_failed(item, code)
                     self._active.remove(item.operation_id)
                     self._stop_requested.discard(item.operation_id)
                     continue
                 if status == "STOPPED":
                     if item.operation_id in self._stop_requested:
                         self._report_cancelled(item)
+                    else:
+                        self._report_failed(item, "RAY_JOB_STOPPED")
                     self._active.remove(item.operation_id)
                     self._stop_requested.discard(item.operation_id)
                     continue
@@ -157,7 +167,27 @@ class CancelWatcher:
         )
 
     def _report_cancelled(self, item: ActiveSubmission) -> None:
-        reporter = RedisEventReporter(
+        reporter = self._reporter(item)
+        reporter.publish(
+            "CANCELLED",
+            {"reason": "cancel key observed after admission"},
+            phase="CANCELLED",
+        )
+
+    def _report_failed(self, item: ActiveSubmission, code: str) -> None:
+        reporter = self._reporter(item)
+        reporter.publish(
+            "FAILED",
+            {
+                "error_code": code,
+                "sanitized_message": "Ray job ended before publishing a terminal event",
+                "retryable": False,
+            },
+            phase="FAILED",
+        )
+
+    def _reporter(self, item: ActiveSubmission) -> RedisEventReporter:
+        reporter = self._reporter_factory(
             self._redis,
             event_stream_prefix=item.channel.event_stream_prefix,
             operation_id=item.operation_id,
@@ -171,11 +201,7 @@ class CancelWatcher:
             max_event_bytes=self._max_event_bytes,
             max_stream_length=self._max_stream_length,
         )
-        reporter.publish(
-            "CANCELLED",
-            {"reason": "cancel key observed after admission"},
-            phase="CANCELLED",
-        )
+        return reporter
 
     def close(self) -> None:
         self._closed.set()

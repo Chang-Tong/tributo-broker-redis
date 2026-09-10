@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from ray.job_submission import JobSubmissionClient
 from tributo.integrations.broker import (
     BrokerError,
     BrokerRuntime,
@@ -29,9 +30,14 @@ from tributo_broker_redis.config import (
     normalize_config,
 )
 from tributo_broker_redis.consumer import RedisTaskConsumer
-from tributo_broker_redis.operations import MappingFailure, prepare_operation
+from tributo_broker_redis.operations import (
+    MappingFailure,
+    PreparedOperation,
+    prepare_operation,
+)
 from tributo_broker_redis.protocol import (
     DriverInput,
+    GenericRequest,
     ProtocolFailure,
     parse_request,
 )
@@ -41,6 +47,12 @@ from tributo_broker_redis.reporter import RedisEventReporter
 logger = logging.getLogger(__name__)
 _DRIVER_ENV = "TRIBUTO_REDIS_DRIVER_INPUT_B64"
 _MAX_DRIVER_INPUT_BYTES = 64 * 1024
+_DEFAULT_DRIVER_ENTRYPOINT = "python -m tributo_broker_redis.execution_driver"
+_ACTIVE_RAY_STATUSES = frozenset({"PENDING", "RUNNING"})
+
+
+def _list_ray_jobs(dashboard_url: str) -> Iterable[Any]:
+    return JobSubmissionClient(dashboard_url).list_jobs()
 
 
 def validate_execution_environment(
@@ -70,9 +82,23 @@ class RedisBrokerRuntime(BrokerRuntime):
         submitter: Callable[..., RayJobSubmission] = submit_ray_job,
         redis_client: Any | None = None,
         start_cancel_watcher: bool = False,
+        request_parser: Callable[..., GenericRequest] = parse_request,
+        operation_preparer: Callable[[GenericRequest], PreparedOperation] = (
+            prepare_operation
+        ),
+        driver_entrypoint: str = _DEFAULT_DRIVER_ENTRYPOINT,
+        reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
+        job_lister: Callable[[str], Iterable[Any]] = _list_ray_jobs,
     ) -> None:
+        if not driver_entrypoint.strip():
+            raise ValueError("driver_entrypoint must not be empty")
         self.config = config
         self._submitter = submitter
+        self._request_parser = request_parser
+        self._operation_preparer = operation_preparer
+        self._driver_entrypoint = driver_entrypoint
+        self._reporter_factory = reporter_factory
+        self._job_lister = job_lister
         validate_execution_environment(config)
         self._redis = redis_client or create_redis_client(config)
         self._consumers: dict[OperationType, RedisTaskConsumer] = {
@@ -92,9 +118,11 @@ class RedisBrokerRuntime(BrokerRuntime):
             interval_seconds=config.execution.cancel_poll_interval_seconds,
             max_event_bytes=config.transport.max_event_bytes,
             max_stream_length=config.transport.max_stream_length,
+            reporter_factory=reporter_factory,
         )
         self._next_channel = 0
         self._closed = False
+        self._started = False
         if start_cancel_watcher:
             self._cancel_watcher.start()
 
@@ -108,7 +136,71 @@ class RedisBrokerRuntime(BrokerRuntime):
         return self._consumers
 
     def start(self) -> None:
+        if self._started:
+            return
+        for consumer in self._consumers.values():
+            consumer.recover_pending()
+        self._recover_active_submissions()
         self._cancel_watcher.start()
+        self._started = True
+
+    def _recover_active_submissions(self) -> None:
+        """Rebuild cancellation/watchdog state from credential-free Ray metadata."""
+        jobs = self._job_lister(self.config.execution.ray_dashboard_url)
+        for job in jobs:
+            raw_status = getattr(job, "status", "")
+            status = str(getattr(raw_status, "value", raw_status)).upper()
+            if status not in _ACTIVE_RAY_STATUSES:
+                continue
+            metadata = getattr(job, "metadata", None)
+            if not isinstance(metadata, Mapping):
+                continue
+            operation_id = metadata.get("tributo.operation_id")
+            operation_type = metadata.get("tributo.operation_type")
+            execution_profile = metadata.get("tributo.execution_profile")
+            run_id = metadata.get("tributo.run_id")
+            attempt_id = metadata.get("tributo.attempt_id")
+            driver_entrypoint = metadata.get("tributo.driver_entrypoint")
+            task_stream = metadata.get("tributo.task_stream")
+            submission_id = getattr(job, "submission_id", None)
+            required = (
+                operation_id,
+                operation_type,
+                execution_profile,
+                run_id,
+                attempt_id,
+                driver_entrypoint,
+                task_stream,
+                submission_id,
+            )
+            if (
+                not all(isinstance(value, str) and value for value in required)
+                or operation_type not in {"training", "batch_inference"}
+                or execution_profile not in {"single_worker", "distributed"}
+                or driver_entrypoint != self._driver_entrypoint
+            ):
+                continue
+            channel = self.config.channels.for_operation(
+                cast(OperationType, operation_type)
+            )
+            if task_stream != channel.task_stream_key:
+                continue
+            self.active_submissions.put(
+                ActiveSubmission(
+                    operation_id=cast(str, operation_id),
+                    operation_type=cast(OperationType, operation_type),
+                    execution_profile=cast(ExecutionProfile, execution_profile),
+                    run_id=cast(str, run_id),
+                    channel=channel,
+                    submission=RayJobSubmission(
+                        run_id=cast(str, run_id),
+                        attempt_id=cast(str, attempt_id),
+                        submission_id=cast(str, submission_id),
+                        ray_job_id=getattr(job, "job_id", None),
+                        request_digest=metadata.get("tributo.request_digest"),
+                    ),
+                )
+            )
 
     def _reporter(
         self,
@@ -121,7 +213,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         submission: RayJobSubmission | None = None,
     ) -> RedisEventReporter:
         channel = self.config.channels.for_operation(operation_type)
-        return RedisEventReporter(
+        return self._reporter_factory(
             self._redis,
             event_stream_prefix=channel.event_stream_prefix,
             operation_id=operation_id,
@@ -213,7 +305,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 sanitized_message="payload must be a JSON string",
             )
         try:
-            request = parse_request(
+            request = self._request_parser(
                 raw,
                 outer_operation_id=outer_operation_id,
                 expected_operation_type=operation_type,
@@ -232,7 +324,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                     "UNSUPPORTED_EXECUTION_PROFILE",
                     "execution profile is disabled by provider configuration",
                 )
-            prepared = prepare_operation(request)
+            prepared = self._operation_preparer(request)
         except MappingFailure as exc:
             return self._invalid(
                 message,
@@ -300,7 +392,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         env_vars[_DRIVER_ENV] = encoded_driver_input
         try:
             submission = self._submitter(
-                "python -m tributo_broker_redis.execution_driver",
+                self._driver_entrypoint,
                 operation_namespace=namespace,
                 run_id=run_id,
                 attempt_id=request.attempt_id,
@@ -321,6 +413,10 @@ class RedisBrokerRuntime(BrokerRuntime):
                     "tributo.operation_type": operation_type,
                     "tributo.execution_profile": request.execution_profile,
                     "tributo.protocol_profile": request.protocol_profile,
+                    "tributo.run_id": run_id,
+                    "tributo.attempt_id": request.attempt_id,
+                    "tributo.driver_entrypoint": self._driver_entrypoint,
+                    "tributo.task_stream": channel.task_stream_key,
                 },
                 request_digest=request.request_digest,
                 entrypoint_num_cpus=self.config.execution.entrypoint_num_cpus,

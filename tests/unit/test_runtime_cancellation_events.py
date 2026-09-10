@@ -17,12 +17,14 @@ from tributo_broker_redis.cancellation import (
     CancelWatcher,
 )
 from tributo_broker_redis.config import OperationType, RedisBrokerConfig
+from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.execution_driver import (
     CredentialUnavailable,
     _load_driver_input,
     _resolve_credential_reference,
 )
-from tributo_broker_redis.protocol import DriverInput
+from tributo_broker_redis.operations import PreparedOperation
+from tributo_broker_redis.protocol import DriverInput, GenericRequest
 from tributo_broker_redis.reporter import RedisEventReporter, redact
 from tributo_broker_redis.runtime import RedisBrokerRuntime
 
@@ -62,6 +64,70 @@ class SubmissionRecorder:
             ray_job_id="ray-job-1",
             request_digest=kwargs["request_digest"],
         )
+
+
+def test_runtime_accepts_thin_protocol_and_driver_hooks(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+) -> None:
+    operation_id = "knova-training-1"
+    fake_redis.messages["tasks:training"] = [
+        (
+            "1-0",
+            {
+                "operation_id": operation_id,
+                "payload": '{"protocol_version":"2.0","job_id":"knova-training-1"}',
+            },
+        )
+    ]
+    parsed_payloads: list[str] = []
+    reporter_calls: list[dict[str, Any]] = []
+
+    class HookedReporter(RedisEventReporter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            reporter_calls.append(dict(kwargs))
+            super().__init__(*args, **kwargs)
+
+    def parse_knova(
+        raw_payload: str,
+        *,
+        outer_operation_id: str,
+        expected_operation_type: OperationType,
+    ) -> GenericRequest:
+        parsed_payloads.append(raw_payload)
+        return GenericRequest(
+            protocol_profile="tributo-generic-v1",
+            protocol_version="1.0",
+            operation_id=outer_operation_id,
+            operation_type=expected_operation_type,
+            execution_profile="distributed",
+            run_id=outer_operation_id,
+            request_digest="d" * 64,
+            spec={"knova_request": {"job_id": outer_operation_id}},
+        )
+
+    def prepare_knova(request: GenericRequest) -> PreparedOperation:
+        return PreparedOperation(
+            operation_payload=dict(request.spec),
+            credential_ref=None,
+        )
+
+    submitter = SubmissionRecorder()
+    runtime = RedisBrokerRuntime(
+        config,
+        submitter=submitter,
+        redis_client=fake_redis,
+        request_parser=parse_knova,
+        operation_preparer=prepare_knova,
+        driver_entrypoint="python -m tributo_knova.execution_driver",
+        reporter_factory=HookedReporter,
+    )
+
+    assert runtime.run_once(timeout_ms=0) is True
+    assert parsed_payloads == ['{"protocol_version":"2.0","job_id":"knova-training-1"}']
+    assert submitter.calls[0][0] == "python -m tributo_knova.execution_driver"
+    assert reporter_calls[-1]["operation_id"] == operation_id
+    assert fake_redis.acked == [("tasks:training", "group:training", "1-0")]
 
 
 @pytest.mark.parametrize(
@@ -675,7 +741,7 @@ def test_late_cancel_does_not_stop_a_terminal_operation(
     assert active.get(item.operation_id) is None
 
 
-def test_external_stopped_submission_is_removed_without_cancelled_event(
+def test_external_stopped_submission_publishes_failed_terminal_event(
     config: RedisBrokerConfig, fake_redis: FakeRedis
 ) -> None:
     submission = RayJobSubmission(
@@ -708,7 +774,64 @@ def test_external_stopped_submission_is_removed_without_cancelled_event(
     watcher.check_once()
 
     assert active.get(item.operation_id) is None
-    assert item.channel.event_stream_key(item.operation_id) not in fake_redis.events
+    event = json.loads(
+        fake_redis.events[item.channel.event_stream_key(item.operation_id)][-1][
+            "payload"
+        ]
+    )
+    assert event["event_type"] == "FAILED"
+    assert event["payload"]["error_code"] == "RAY_JOB_STOPPED"
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        ("FAILED", "RAY_JOB_FAILED"),
+        ("SUCCEEDED", "TERMINAL_EVENT_MISSING"),
+    ],
+)
+def test_terminal_ray_status_without_driver_event_publishes_failed(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    status: str,
+    code: str,
+) -> None:
+    submission = RayJobSubmission(
+        run_id="run-missing-terminal",
+        attempt_id="attempt-1",
+        submission_id="submission-missing-terminal",
+    )
+    item = ActiveSubmission(
+        operation_id="operation-missing-terminal",
+        operation_type="training",
+        execution_profile="single_worker",
+        run_id=submission.run_id,
+        channel=config.channels.training,
+        submission=submission,
+    )
+    active = ActiveSubmissionMap()
+    active.put(item)
+    watcher = CancelWatcher(
+        fake_redis,
+        active,
+        dashboard_url="http://ray:8265",
+        interval_seconds=1,
+        max_event_bytes=1024 * 1024,
+        max_stream_length=100,
+        status_getter=lambda *_args, **_kwargs: status,
+        stopper=lambda *_args, **_kwargs: pytest.fail("stop must not be requested"),
+    )
+
+    watcher.check_once()
+
+    event = json.loads(
+        fake_redis.events[item.channel.event_stream_key(item.operation_id)][-1][
+            "payload"
+        ]
+    )
+    assert event["event_type"] == "FAILED"
+    assert event["payload"]["error_code"] == code
+    assert active.get(item.operation_id) is None
 
 
 def test_old_attempt_terminal_event_does_not_hide_active_submission(
@@ -763,3 +886,56 @@ def test_old_attempt_terminal_event_does_not_hide_active_submission(
 
     assert stopped == [current.submission_id]
     assert active.get(item.operation_id) is item
+
+
+def test_start_recovers_pending_deliveries_and_active_ray_jobs(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovered: list[str] = []
+
+    def recover_pending(consumer: RedisTaskConsumer) -> int:
+        recovered.append(consumer.operation_type)
+        return 0
+
+    monkeypatch.setattr(
+        RedisTaskConsumer,
+        "recover_pending",
+        recover_pending,
+    )
+    job = SimpleNamespace(
+        status="RUNNING",
+        submission_id="submission-recovered",
+        job_id="ray-job-recovered",
+        metadata={
+            "tributo.operation_id": "operation-recovered",
+            "tributo.operation_type": "training",
+            "tributo.execution_profile": "distributed",
+            "tributo.protocol_profile": "tributo-generic-v1",
+            "tributo.run_id": "run-recovered",
+            "tributo.attempt_id": "attempt-2",
+            "tributo.driver_entrypoint": (
+                "python -m tributo_broker_redis.execution_driver"
+            ),
+            "tributo.task_stream": config.channels.training.task_stream_key,
+            "tributo.request_digest": "a" * 64,
+        },
+    )
+    runtime = RedisBrokerRuntime(
+        config,
+        redis_client=fake_redis,
+        start_cancel_watcher=False,
+        job_lister=lambda _url: [job],
+    )
+    monkeypatch.setattr(runtime._cancel_watcher, "start", lambda: None)
+
+    runtime.start()
+    runtime.start()
+
+    assert sorted(recovered) == ["batch_inference", "training"]
+    item = runtime.active_submissions.get("operation-recovered")
+    assert item is not None
+    assert item.run_id == "run-recovered"
+    assert item.submission.attempt_id == "attempt-2"
+    assert item.submission.request_digest == "a" * 64
