@@ -15,6 +15,8 @@ from tributo_broker_redis.config import ChannelConfig, ExecutionProfile, Operati
 from tributo_broker_redis.reporter import RedisEventReporter
 
 logger = logging.getLogger(__name__)
+_TERMINAL_EVENT_TYPES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_TERMINAL_LOOKBACK = 16
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,36 @@ class ActiveSubmissionMap:
     def get(self, operation_id: str) -> ActiveSubmission | None:
         with self._lock:
             return self._items.get(operation_id)
+
+
+def terminal_event_published(
+    redis_client: Any,
+    item: ActiveSubmission,
+) -> bool:
+    """Find a recent terminal event even if a recovery event followed it."""
+    xrevrange = getattr(redis_client, "xrevrange", None)
+    if not callable(xrevrange):
+        return False
+    stream = item.channel.event_stream_key(item.operation_id)
+    entries = xrevrange(stream, count=_TERMINAL_LOOKBACK)
+    for _entry_id, fields in entries:
+        raw = fields.get("payload")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if not isinstance(raw, str):
+            continue
+        try:
+            event = json.loads(raw)
+            event_type = event.get("event_type")
+            submission_id = event.get("submission_id")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if (
+            event_type in _TERMINAL_EVENT_TYPES
+            and submission_id == item.submission.submission_id
+        ):
+            return True
+    return False
 
 
 class CancelWatcher:
@@ -138,33 +170,7 @@ class CancelWatcher:
                 )
 
     def _terminal_event_published(self, item: ActiveSubmission) -> bool:
-        xrevrange = getattr(self._redis, "xrevrange", None)
-        if not callable(xrevrange):
-            return False
-        stream = item.channel.event_stream_key(item.operation_id)
-        entries = xrevrange(stream, count=1)
-        if not entries:
-            return False
-        raw = entries[0][1].get("payload")
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        if not isinstance(raw, str):
-            return False
-        try:
-            event = json.loads(raw)
-            event_type = event.get("event_type")
-            submission_id = event.get("submission_id")
-        except (json.JSONDecodeError, AttributeError):
-            return False
-        return (
-            event_type
-            in {
-                "COMPLETED",
-                "FAILED",
-                "CANCELLED",
-            }
-            and submission_id == item.submission.submission_id
-        )
+        return terminal_event_published(self._redis, item)
 
     def _report_cancelled(self, item: ActiveSubmission) -> None:
         reporter = self._reporter(item)
@@ -209,4 +215,9 @@ class CancelWatcher:
             self._thread.join(timeout=max(1.0, self._interval * 2))
 
 
-__all__ = ["ActiveSubmission", "ActiveSubmissionMap", "CancelWatcher"]
+__all__ = [
+    "ActiveSubmission",
+    "ActiveSubmissionMap",
+    "CancelWatcher",
+    "terminal_event_published",
+]

@@ -11,11 +11,13 @@ The release gate covers these healthy paths:
 - Bundle-backed batch inference with `single_worker` and `distributed` profiles;
 - Standalone Redis, Redis consumer groups, one provider execution-driver Ray
   Job, Bundle or ResultSink output, and best-effort terminal events;
+- best-effort restart recovery from Redis pending deliveries and active Ray Job
+  metadata, without resubmitting an exact recovered delivery;
 - queued cancellation and running cancellation through Ray Jobs stop.
 
 Unknown protocol fields and unsupported algorithms or profiles fail closed.
 This release does not promise cross-restart exactly-once behavior, durable
-events, complete pending recovery, DLQ processing, Sentinel, Cluster, or HA.
+events, complete recovery, DLQ processing, Sentinel, Cluster, or HA.
 
 ## Installation
 

@@ -888,6 +888,55 @@ def test_old_attempt_terminal_event_does_not_hide_active_submission(
     assert active.get(item.operation_id) is item
 
 
+def test_terminal_event_is_found_when_a_later_nonterminal_event_exists(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+) -> None:
+    submission = RayJobSubmission(
+        run_id="run-current",
+        attempt_id="attempt-1",
+        submission_id="submission-current",
+    )
+    item = ActiveSubmission(
+        operation_id="operation-current",
+        operation_type="training",
+        execution_profile="single_worker",
+        run_id=submission.run_id,
+        channel=config.channels.training,
+        submission=submission,
+    )
+    active = ActiveSubmissionMap()
+    active.put(item)
+    reporter = RedisEventReporter(
+        fake_redis,
+        event_stream_prefix=item.channel.event_stream_prefix,
+        operation_id=item.operation_id,
+        operation_type=item.operation_type,
+        execution_profile=item.execution_profile,
+        run_id=item.run_id,
+        attempt_id=item.submission.attempt_id,
+        submission_id=item.submission.submission_id,
+    )
+    reporter.publish("COMPLETED", {"result_reference": "/bundle"})
+    reporter.publish("ACCEPTED", {"recovered": True})
+    stream = item.channel.event_stream_key(item.operation_id)
+    event_count = len(fake_redis.events[stream])
+    watcher = CancelWatcher(
+        fake_redis,
+        active,
+        dashboard_url="http://ray:8265",
+        interval_seconds=1,
+        max_event_bytes=1024 * 1024,
+        max_stream_length=100,
+        status_getter=lambda *_args, **_kwargs: "SUCCEEDED",
+    )
+
+    watcher.check_once()
+
+    assert active.get(item.operation_id) is None
+    assert len(fake_redis.events[stream]) == event_count
+
+
 def test_start_recovers_pending_deliveries_and_active_ray_jobs(
     config: RedisBrokerConfig,
     fake_redis: FakeRedis,
@@ -939,3 +988,116 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
     assert item.run_id == "run-recovered"
     assert item.submission.attempt_id == "attempt-2"
     assert item.submission.request_digest == "a" * 64
+
+
+def test_recovered_delivery_reuses_active_ray_job_without_resubmission(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = "operation-recovered"
+    fake_redis.messages[config.channels.training.task_stream_key] = [
+        (
+            "9-0",
+            {
+                "operation_id": operation_id,
+                "payload": _request(
+                    operation_id,
+                    "training",
+                    "single_worker",
+                    {"algorithm": "xgboost", "config": training_config(1)},
+                ),
+            },
+        )
+    ]
+    job = SimpleNamespace(
+        status="RUNNING",
+        submission_id="submission-recovered",
+        job_id="ray-job-recovered",
+        metadata={
+            "tributo.operation_id": operation_id,
+            "tributo.operation_type": "training",
+            "tributo.execution_profile": "single_worker",
+            "tributo.run_id": f"run-{operation_id}",
+            "tributo.attempt_id": "attempt-1",
+            "tributo.driver_entrypoint": (
+                "python -m tributo_broker_redis.execution_driver"
+            ),
+            "tributo.task_stream": config.channels.training.task_stream_key,
+            "tributo.request_digest": "d" * 64,
+        },
+    )
+    submitter = SubmissionRecorder()
+    runtime = RedisBrokerRuntime(
+        config,
+        submitter=submitter,
+        redis_client=fake_redis,
+        job_lister=lambda _url: [job],
+    )
+    monkeypatch.setattr(runtime._cancel_watcher, "start", lambda: None)
+
+    runtime.start()
+
+    assert runtime.run_once(timeout_ms=0) is True
+    assert submitter.calls == []
+    assert fake_redis.acked == [
+        (config.channels.training.task_stream_key, "group:training", "9-0")
+    ]
+    event_stream = config.channels.training.event_stream_key(operation_id)
+    accepted = json.loads(fake_redis.events[event_stream][-1]["payload"])
+    assert accepted["event_type"] == "ACCEPTED"
+    assert accepted["payload"]["recovered"] is True
+    assert accepted["submission_id"] == "submission-recovered"
+
+
+def test_recovered_delivery_without_digest_is_not_acked_as_identical(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = "operation-no-digest"
+    payload = json.loads(
+        _request(
+            operation_id,
+            "training",
+            "single_worker",
+            {"algorithm": "xgboost", "config": training_config(1)},
+        )
+    )
+    payload.pop("request_digest")
+    fake_redis.messages[config.channels.training.task_stream_key] = [
+        (
+            "10-0",
+            {"operation_id": operation_id, "payload": json.dumps(payload)},
+        )
+    ]
+    job = SimpleNamespace(
+        status="RUNNING",
+        submission_id="submission-no-digest",
+        job_id="ray-job-no-digest",
+        metadata={
+            "tributo.operation_id": operation_id,
+            "tributo.operation_type": "training",
+            "tributo.execution_profile": "single_worker",
+            "tributo.run_id": f"run-{operation_id}",
+            "tributo.attempt_id": "attempt-1",
+            "tributo.driver_entrypoint": (
+                "python -m tributo_broker_redis.execution_driver"
+            ),
+            "tributo.task_stream": config.channels.training.task_stream_key,
+        },
+    )
+    submitter = SubmissionRecorder()
+    runtime = RedisBrokerRuntime(
+        config,
+        submitter=submitter,
+        redis_client=fake_redis,
+        job_lister=lambda _url: [job],
+    )
+    monkeypatch.setattr(runtime._cancel_watcher, "start", lambda: None)
+
+    runtime.start()
+
+    assert runtime.run_once(timeout_ms=0) is True
+    assert submitter.calls == []
+    assert fake_redis.acked == []

@@ -22,6 +22,7 @@ from tributo_broker_redis.cancellation import (
     ActiveSubmission,
     ActiveSubmissionMap,
     CancelWatcher,
+    terminal_event_published,
 )
 from tributo_broker_redis.config import (
     ExecutionProfile,
@@ -138,9 +139,9 @@ class RedisBrokerRuntime(BrokerRuntime):
     def start(self) -> None:
         if self._started:
             return
+        self._recover_active_submissions()
         for consumer in self._consumers.values():
             consumer.recover_pending()
-        self._recover_active_submissions()
         self._cancel_watcher.start()
         self._started = True
 
@@ -185,6 +186,20 @@ class RedisBrokerRuntime(BrokerRuntime):
             )
             if task_stream != channel.task_stream_key:
                 continue
+            ray_job_id = getattr(job, "job_id", None)
+            if not isinstance(ray_job_id, str) or not ray_job_id:
+                ray_job_id = None
+            request_digest = metadata.get("tributo.request_digest")
+            if request_digest is not None and (
+                not isinstance(request_digest, str) or not request_digest
+            ):
+                continue
+            if self.active_submissions.get(cast(str, operation_id)) is not None:
+                logger.warning(
+                    "Ignoring duplicate active Ray Job metadata: operation_id=%s",
+                    operation_id,
+                )
+                continue
             self.active_submissions.put(
                 ActiveSubmission(
                     operation_id=cast(str, operation_id),
@@ -196,11 +211,74 @@ class RedisBrokerRuntime(BrokerRuntime):
                         run_id=cast(str, run_id),
                         attempt_id=cast(str, attempt_id),
                         submission_id=cast(str, submission_id),
-                        ray_job_id=getattr(job, "job_id", None),
-                        request_digest=metadata.get("tributo.request_digest"),
+                        ray_job_id=ray_job_id,
+                        request_digest=request_digest,
                     ),
                 )
             )
+
+    def _resume_existing_submission(
+        self,
+        request: GenericRequest,
+        operation_type: OperationType,
+    ) -> TaskOutcome | None:
+        """Acknowledge an exact recovered delivery without submitting a second job."""
+        existing = self.active_submissions.get(request.operation_id)
+        if existing is None:
+            return None
+        run_id = request.run_id or request.operation_id
+        if (
+            existing.operation_type != operation_type
+            or existing.execution_profile != request.execution_profile
+            or existing.run_id != run_id
+            or existing.submission.attempt_id != request.attempt_id
+            or request.request_digest is None
+            or existing.submission.request_digest is None
+            or existing.submission.request_digest != request.request_digest
+        ):
+            return TaskOutcome(
+                TaskDisposition.RETRY,
+                BrokerError(
+                    code="OPERATION_ALREADY_ACTIVE",
+                    sanitized_message=(
+                        "operation_id is already active with different identity"
+                    ),
+                ),
+            )
+        if terminal_event_published(self._redis, existing):
+            self.active_submissions.remove(request.operation_id)
+            return TaskOutcome(TaskDisposition.ACK)
+        try:
+            self._reporter(
+                operation_id=request.operation_id,
+                operation_type=operation_type,
+                execution_profile=request.execution_profile,
+                run_id=run_id,
+                attempt_id=request.attempt_id,
+                submission=existing.submission,
+            ).publish(
+                "ACCEPTED",
+                {
+                    "submission_id": existing.submission.submission_id,
+                    "ray_job_id": existing.submission.ray_job_id,
+                    "recovered": True,
+                },
+                phase="ADMITTED",
+            )
+        except Exception:
+            logger.warning(
+                "Could not confirm recovered Ray admission: operation_id=%s",
+                request.operation_id,
+                exc_info=True,
+            )
+            return TaskOutcome(
+                TaskDisposition.RETRY,
+                BrokerError(
+                    code="RECOVERED_ADMISSION_UNCONFIRMED",
+                    sanitized_message="recovered Ray admission could not be confirmed",
+                ),
+            )
+        return TaskOutcome(TaskDisposition.ACK)
 
     def _reporter(
         self,
@@ -338,6 +416,9 @@ class RedisBrokerRuntime(BrokerRuntime):
 
         channel = self.config.channels.for_operation(operation_type)
         run_id = request.run_id or request.operation_id
+        recovered_outcome = self._resume_existing_submission(request, operation_type)
+        if recovered_outcome is not None:
+            return recovered_outcome
         reporter = self._reporter(
             operation_id=request.operation_id,
             operation_type=operation_type,
