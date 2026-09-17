@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from redis.exceptions import ResponseError
+from redis.exceptions import ResponseError, TimeoutError
 from tributo.integrations.broker import BrokerError, Message, TaskConsumer
 
 from tributo_broker_redis.config import (
@@ -85,13 +85,20 @@ class RedisTaskConsumer(TaskConsumer):
         if self._pending_messages:
             return self._pending_messages.pop(0)
         block_ms = timeout_ms if timeout_ms > 0 else None
-        response = self._redis.xreadgroup(
-            groupname=self.channel.consumer_group,
-            consumername=self.channel.consumer_name,
-            streams={self.channel.task_stream_key: ">"},
-            count=1,
-            block=block_ms,
-        )
+        try:
+            response = self._redis.xreadgroup(
+                groupname=self.channel.consumer_group,
+                consumername=self.channel.consumer_name,
+                streams={self.channel.task_stream_key: ">"},
+                count=1,
+                block=block_ms,
+            )
+        except TimeoutError:
+            # redis-py 8.x applies a finite socket timeout by default. A
+            # blocking XREADGROUP can therefore time out at the client just
+            # as Redis completes an empty poll. Treat that race exactly like
+            # an empty response so an idle consumer remains available.
+            return None
         if not response or not response[0][1]:
             return None
         delivery_id, fields = response[0][1][0]
