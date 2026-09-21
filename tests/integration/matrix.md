@@ -22,9 +22,13 @@ below.
 | Attempt 2 after JSON-safe metrics conversion | Same complete wheel, isolation, image, four-path, failure, cancellation, event, and credential matrix | distinguish serialization from the first post-training Redis write | Failed at the same assertion: 1 failed, 2 passed in 91.71 seconds; JSON-safe conversion did not change the outcome, and the larger `COMPLETED` event still succeeded |
 | Final rerun after one immediate best-effort retry | Same complete wheel, isolation, image, four-path, failure, cancellation, event, and credential matrix | execution driver changed after attempt 2 to tolerate one transient nonterminal `XADD` failure | Passed: wheel contract 2 tests; Core-only import; image preflight; runtime matrix 3 tests in 167.07 seconds. Logs: `.runtime/wheel-discovery.log`, `.runtime/ray-image.log`, `.runtime/standalone.log`, and `.runtime/docker.log` |
 | Post-review final run | Current provider code + Core `8a3bb4d`; same complete wheel, isolation, image, four-path, failure, cancellation, event, and credential matrix | production runtime and driver identity/event/cancel boundaries changed after the prior pass | Passed: wheel contract 2 tests; Core-only import; image preflight; runtime matrix 3 tests in 172.78 seconds. Logs: `.runtime/wheel-discovery.log`, `.runtime/ray-image.log`, `.runtime/standalone.log`, and `.runtime/docker.log` |
+| Sentinel credential and failover smoke | Redis 8: password-protected primary + replica, three Sentinel nodes, DB 3, credential supplied through `env:` reference | validate native redis-py Sentinel discovery, Streams I/O, failover, and reconnect without serializing a secret | Passed locally on 2026-09-21: `PING`, `SET`/`GET`, `XADD`/`XREAD`, primary stop, replica promotion, and client reconnect |
+| Devbox standalone compatibility smoke | Existing KnoVa devbox `redis-server` on `knova-network` | preserve the original standalone configuration while adding Sentinel | Passed locally on 2026-09-21: `PING` and `SET`/`GET` through `RedisConnectionConfig(mode="standalone")` |
 
-Sentinel, Cluster, reconnect, ACK-loss recovery, DLQ, HA, and cross-restart
-idempotency are intentionally outside this Alpha matrix.
+Redis Cluster, ACK-loss recovery, DLQ, full HA soak, and cross-restart
+idempotency remain outside this Alpha matrix. Sentinel now has a focused
+credential/discovery/failover smoke; the complete four-operation Docker/Ray
+matrix still covers standalone Redis only.
 
 The v0.1 stop path checks the latest terminal event before publishing
 `CANCELLED`, but it has no durable arbitration between artifact persistence

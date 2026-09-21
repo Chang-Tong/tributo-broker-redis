@@ -25,6 +25,8 @@ class RedisBrokerPlugin(BrokerPlugin):
         {
             "transport.redis.streams",
             "transport.redis.consumer-group",
+            "transport.redis.sentinel",
+            "transport.redis.credential-reference",
             "operation.training.single_worker",
             "operation.training.distributed",
             "operation.batch_inference.single_worker",

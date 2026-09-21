@@ -452,7 +452,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             attempt_id=request.attempt_id,
             credential_ref=prepared.credential_ref,
             operation_payload=prepared.operation_payload,
-            redis_url=self.config.transport.ray_driver_url,
+            redis_transport=self.config.transport.ray_driver_connection(),
             event_stream_prefix=channel.event_stream_prefix,
             outer_identity_field=channel.outer_identity_field,
             max_event_bytes=self.config.transport.max_event_bytes,

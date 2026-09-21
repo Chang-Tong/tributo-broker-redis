@@ -1,0 +1,70 @@
+{
+  "broker_id": "tributo-redis",
+  "api_version": 1,
+  "transport": {
+    "mode": "sentinel",
+    "sentinel_nodes": [
+      "redis-sentinel-0.internal:26379",
+      "redis-sentinel-1.internal:26379",
+      "redis-sentinel-2.internal:26379"
+    ],
+    "driver_sentinel_nodes": [
+      "redis-sentinel-0.internal:26379",
+      "redis-sentinel-1.internal:26379",
+      "redis-sentinel-2.internal:26379"
+    ],
+    "sentinel_master": "mymaster",
+    "database": 3,
+    "password_ref": "env:KNOVA_REDIS_PASSWORD",
+    "sentinel_password_ref": "env:KNOVA_REDIS_SENTINEL_PASSWORD",
+    "block_ms": 1000,
+    "claim_idle_ms": 60000,
+    "claim_count": 10,
+    "max_payload_bytes": 1048576,
+    "max_event_bytes": 1048576,
+    "max_stream_length": 1000
+  },
+  "channels": {
+    "training": {
+      "task_stream_key": "tributo:training:tasks",
+      "event_stream_prefix": "tributo:training:events",
+      "cancel_key_prefix": "tributo:training:cancel",
+      "consumer_group": "tributo-training",
+      "consumer_name": "training-consumer",
+      "group_start_id": "0-0",
+      "outer_identity_field": "operation_id"
+    },
+    "batch_inference": {
+      "task_stream_key": "tributo:batch-inference:tasks",
+      "event_stream_prefix": "tributo:batch-inference:events",
+      "cancel_key_prefix": "tributo:batch-inference:cancel",
+      "consumer_group": "tributo-batch-inference",
+      "consumer_name": "batch-inference-consumer",
+      "group_start_id": "0-0",
+      "outer_identity_field": "operation_id"
+    }
+  },
+  "protocol": {
+    "profile": "tributo-generic-v1",
+    "protocol_version": "1.0"
+  },
+  "operations": {
+    "training": {
+      "execution_profiles": ["single_worker", "distributed"]
+    },
+    "batch_inference": {
+      "execution_profiles": ["single_worker", "distributed"]
+    }
+  },
+  "execution": {
+    "ray_dashboard_url": "http://ray-head.internal:8265",
+    "project_root": "/opt/tributo-core",
+    "extra_py_modules": [],
+    "runtime_pip_packages": [
+      "/provider/tributo_broker_redis-0.1.0-py3-none-any.whl"
+    ],
+    "env_vars": {},
+    "cancel_poll_interval_seconds": 0.5,
+    "entrypoint_num_cpus": 1.0
+  }
+}

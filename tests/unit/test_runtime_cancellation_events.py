@@ -16,7 +16,11 @@ from tributo_broker_redis.cancellation import (
     ActiveSubmissionMap,
     CancelWatcher,
 )
-from tributo_broker_redis.config import OperationType, RedisBrokerConfig
+from tributo_broker_redis.config import (
+    OperationType,
+    RedisBrokerConfig,
+    RedisTransportConfig,
+)
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.execution_driver import (
     CredentialUnavailable,
@@ -130,6 +134,77 @@ def test_runtime_accepts_thin_protocol_and_driver_hooks(
     assert fake_redis.acked == [("tasks:training", "group:training", "1-0")]
 
 
+def test_runtime_sends_credential_free_sentinel_descriptor_to_driver(
+    config: RedisBrokerConfig,
+    fake_redis: FakeRedis,
+) -> None:
+    operation_id = "knova-sentinel-training"
+    fake_redis.messages["tasks:training"] = [
+        (
+            "1-0",
+            {
+                "operation_id": operation_id,
+                "payload": '{"protocol_version":"2.0"}',
+            },
+        )
+    ]
+    sentinel_transport = RedisTransportConfig(
+        mode="sentinel",
+        sentinel_nodes=("sentinel-consumer:26379",),
+        driver_sentinel_nodes=("sentinel-ray:26379",),
+        sentinel_master="mymaster",
+        database=3,
+        password_ref="env:KNOVA_REDIS_PASSWORD",
+        sentinel_password_ref="env:KNOVA_REDIS_SENTINEL_PASSWORD",
+        block_ms=1,
+    )
+    sentinel_config = config.model_copy(update={"transport": sentinel_transport})
+
+    def parse_knova(
+        _raw_payload: str,
+        *,
+        outer_operation_id: str,
+        expected_operation_type: OperationType,
+    ) -> GenericRequest:
+        return GenericRequest(
+            protocol_profile="tributo-generic-v1",
+            protocol_version="1.0",
+            operation_id=outer_operation_id,
+            operation_type=expected_operation_type,
+            execution_profile="distributed",
+            run_id=outer_operation_id,
+            request_digest="d" * 64,
+            spec={"knova_request": {"job_id": outer_operation_id}},
+        )
+
+    submitter = SubmissionRecorder()
+    runtime = RedisBrokerRuntime(
+        sentinel_config,
+        submitter=submitter,
+        redis_client=fake_redis,
+        request_parser=parse_knova,
+        operation_preparer=lambda request: PreparedOperation(
+            operation_payload=dict(request.spec), credential_ref=None
+        ),
+        driver_entrypoint="python -m tributo_knova.execution_driver",
+    )
+
+    assert runtime.run_once(timeout_ms=0) is True
+    encoded = submitter.calls[0][1]["env_vars"]["TRIBUTO_REDIS_DRIVER_INPUT_B64"]
+    driver_input = DriverInput.model_validate_json(
+        base64.urlsafe_b64decode(encoded).decode("utf-8")
+    )
+
+    assert driver_input.redis_url is None
+    assert driver_input.redis_transport is not None
+    assert driver_input.redis_transport.sentinel_nodes == ("sentinel-ray:26379",)
+    assert driver_input.redis_transport.sentinel_master == "mymaster"
+    assert driver_input.redis_transport.database == 3
+    serialized = json.dumps(submitter.calls[0], default=str)
+    assert "redis-runtime-secret" not in serialized
+    assert "sentinel-runtime-secret" not in serialized
+
+
 @pytest.mark.parametrize(
     ("operation_type", "stream", "spec"),
     [
@@ -188,6 +263,16 @@ def test_runtime_consumes_each_channel_admits_one_driver_and_acks(
     )
     assert driver_input["operation_type"] == operation_type
     assert driver_input["credential_ref"] == "env:PREPROVISIONED_RUNTIME_CREDENTIAL"
+    assert driver_input["redis_transport"] == {
+        "mode": "standalone",
+        "url": "redis://redis:6379/0",
+        "sentinel_nodes": [],
+        "sentinel_master": None,
+        "database": 0,
+        "password_ref": None,
+        "sentinel_password_ref": None,
+    }
+    assert driver_input["redis_url"] is None
     assert driver_input["run_id"] == f"run-{operation_id}"
     assert kwargs["run_id"] == driver_input["run_id"]
     assert kwargs["operation_namespace"] == f"redis-{operation_type.replace('_', '-')}"

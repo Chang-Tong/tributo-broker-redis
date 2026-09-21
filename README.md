@@ -9,15 +9,16 @@ The release gate covers these healthy paths:
 
 - XGBoost training with `single_worker` and `distributed` profiles;
 - Bundle-backed batch inference with `single_worker` and `distributed` profiles;
-- Standalone Redis, Redis consumer groups, one provider execution-driver Ray
-  Job, Bundle or ResultSink output, and best-effort terminal events;
+- Standalone or Sentinel Redis, Redis consumer groups, one provider
+  execution-driver Ray Job, Bundle or ResultSink output, and best-effort
+  terminal events;
 - best-effort restart recovery from Redis pending deliveries and active Ray Job
   metadata, without resubmitting an exact recovered delivery;
 - queued cancellation and running cancellation through Ray Jobs stop.
 
 Unknown protocol fields and unsupported algorithms or profiles fail closed.
 This release does not promise cross-restart exactly-once behavior, durable
-events, complete recovery, DLQ processing, Sentinel, Cluster, or HA.
+events, complete recovery, DLQ processing, Redis Cluster, or exactly-once HA.
 
 ## Installation
 
@@ -43,11 +44,23 @@ The provider accepts one closed root shape. Training and batch inference must
 have separate task, event, cancel, and consumer-group names. See
 [`docs/config.example.json`](docs/config.example.json) for a complete example.
 
-Redis URLs cannot contain credentials. `execution.env_vars` is only for
-non-sensitive settings. A task may carry `credential_ref`; the Ray driver
-resolves `env:NAME` or `mount:/absolute/path` from its pre-provisioned runtime.
-The resolved value is never copied into request-derived Ray runtime env,
-metadata, logs, events, Bundle manifests, or result receipts.
+Redis URLs and Sentinel node addresses cannot contain credentials. Standalone
+and Sentinel transports accept `password_ref`; Sentinel additionally accepts
+`sentinel_password_ref`. Both resolve `env:NAME` or
+`mount:/absolute/path` from the pre-provisioned process environment. The same
+references must be available to the Consumer and Ray Job driver. Resolved
+values are never copied into config serialization, driver input, Ray runtime
+env, metadata, logs, events, Bundle manifests, or result receipts.
+
+Sentinel mode requires `sentinel_nodes`, `sentinel_master`, and `database`.
+When Ray nodes reach Sentinel through different addresses, set
+`driver_sentinel_nodes`; otherwise the Consumer node list is reused. Sentinel
+discovery and master failover are delegated to redis-py rather than reimplemented
+by the provider. See [`docs/config.sentinel.example.json`](docs/config.sentinel.example.json).
+
+`execution.env_vars` remains limited to non-sensitive settings. A task may
+carry its own `credential_ref`; the Ray driver resolves it independently from
+the Redis transport credentials.
 
 `execution.extra_py_modules` and `execution.runtime_pip_packages` are trusted
 deployment settings and cannot be supplied by task payloads. Extension modules
@@ -143,8 +156,7 @@ uv run --locked --no-sync python tools/build_tributo_image.py \
 ```
 
 The final integration entry point builds both wheels, validates that image's
-Tributo/Ray/manifest labels, and runs one isolated Standalone Redis plus Docker
-Ray matrix:
+Tributo/Ray/manifest labels, and runs one isolated Redis plus Docker Ray matrix:
 
 ```bash
 TRIBUTO_CORE_ROOT=/path/to/tributo-core \

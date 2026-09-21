@@ -13,11 +13,19 @@ from tributo.integrations.broker import TaskDisposition
 from tributo.ray_jobs import RayJobSubmission
 
 from tributo_broker_redis.cli import _parser, main
-from tributo_broker_redis.config import OperationType, RedisBrokerConfig
+from tributo_broker_redis.config import (
+    OperationType,
+    RedisBrokerConfig,
+    RedisConnectionConfig,
+)
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.operations import MappingFailure, prepare_operation
 from tributo_broker_redis.plugin import RedisBrokerPlugin
 from tributo_broker_redis.protocol import ProtocolFailure, parse_request
+from tributo_broker_redis.redis_client import (
+    RedisCredentialUnavailable,
+    create_redis_client,
+)
 from tributo_broker_redis.runtime import (
     RedisBrokerRuntime,
     validate_execution_environment,
@@ -231,6 +239,140 @@ def test_config_rejects_credentials_and_unknown_compatibility_fields(
         RedisBrokerConfig.model_validate(raw_config)
 
 
+def test_config_accepts_sentinel_with_credential_references(
+    raw_config: dict[str, Any],
+) -> None:
+    raw_config["transport"] = {
+        "mode": "sentinel",
+        "sentinel_nodes": [
+            "10.246.169.54:26379",
+            "10.246.169.25:26379",
+            "10.246.169.56:26379",
+        ],
+        "driver_sentinel_nodes": [
+            "redis-sentinel-0.internal:26379",
+            "redis-sentinel-1.internal:26379",
+        ],
+        "sentinel_master": "mymaster",
+        "database": 3,
+        "password_ref": "env:KNOVA_REDIS_PASSWORD",
+        "sentinel_password_ref": "env:KNOVA_REDIS_SENTINEL_PASSWORD",
+    }
+
+    parsed = RedisBrokerConfig.model_validate(raw_config)
+    driver = parsed.transport.ray_driver_connection()
+
+    assert parsed.transport.mode == "sentinel"
+    assert parsed.transport.url is None
+    assert driver.sentinel_nodes == (
+        "redis-sentinel-0.internal:26379",
+        "redis-sentinel-1.internal:26379",
+    )
+    assert driver.database == 3
+    assert driver.password_ref == "env:KNOVA_REDIS_PASSWORD"
+    assert "KNOVA_REDIS_PASSWORD" in driver.model_dump_json()
+    assert "runtime-secret" not in driver.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"sentinel_nodes": []}, "requires sentinel_nodes"),
+        ({"sentinel_master": None}, "requires sentinel_master"),
+        ({"url": "redis://redis:6379/3"}, "does not accept url"),
+        ({"driver_url": "redis://redis:6379/3"}, "does not accept driver_url"),
+        ({"sentinel_nodes": ["redis-sentinel"]}, "must use host:port"),
+        (
+            {"password_ref": "env://KNOVA_REDIS_PASSWORD"},
+            "String should match pattern",
+        ),
+    ],
+)
+def test_config_rejects_invalid_sentinel_shape(
+    raw_config: dict[str, Any], update: dict[str, Any], message: str
+) -> None:
+    transport: dict[str, Any] = {
+        "mode": "sentinel",
+        "sentinel_nodes": ["redis-sentinel:26379"],
+        "sentinel_master": "mymaster",
+        "database": 3,
+    }
+    transport.update(update)
+    raw_config["transport"] = transport
+
+    with pytest.raises(ValidationError, match=message):
+        RedisBrokerConfig.model_validate(raw_config)
+
+
+def test_sentinel_client_resolves_secrets_without_serializing_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    master_client = object()
+
+    class FakeSentinel:
+        def __init__(
+            self,
+            nodes: list[tuple[str, int]],
+            *,
+            sentinel_kwargs: dict[str, Any],
+            **kwargs: Any,
+        ) -> None:
+            captured["nodes"] = nodes
+            captured["sentinel_kwargs"] = sentinel_kwargs
+            captured["connection_kwargs"] = kwargs
+
+        def master_for(self, name: str) -> object:
+            captured["master"] = name
+            return master_client
+
+    monkeypatch.setenv("KNOVA_REDIS_PASSWORD", "redis-runtime-secret")
+    monkeypatch.setenv("KNOVA_REDIS_SENTINEL_PASSWORD", "sentinel-runtime-secret")
+    monkeypatch.setattr("tributo_broker_redis.redis_client.Sentinel", FakeSentinel)
+    config = RedisConnectionConfig(
+        mode="sentinel",
+        sentinel_nodes=("10.246.169.54:26379", "redis-sentinel:26380"),
+        sentinel_master="mymaster",
+        database=3,
+        password_ref="env:KNOVA_REDIS_PASSWORD",
+        sentinel_password_ref="env:KNOVA_REDIS_SENTINEL_PASSWORD",
+    )
+
+    client = create_redis_client(config)
+
+    assert client is master_client
+    assert captured == {
+        "nodes": [("10.246.169.54", 26379), ("redis-sentinel", 26380)],
+        "sentinel_kwargs": {
+            "decode_responses": True,
+            "password": "sentinel-runtime-secret",
+        },
+        "connection_kwargs": {
+            "db": 3,
+            "decode_responses": True,
+            "password": "redis-runtime-secret",
+        },
+        "master": "mymaster",
+    }
+    serialized = config.model_dump_json()
+    assert "redis-runtime-secret" not in serialized
+    assert "sentinel-runtime-secret" not in serialized
+
+
+def test_redis_credential_reference_must_be_preprovisioned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KNOVA_REDIS_PASSWORD", raising=False)
+    config = RedisConnectionConfig(
+        mode="standalone",
+        url="redis://redis:6379/3",
+        password_ref="env:KNOVA_REDIS_PASSWORD",
+    )
+
+    with pytest.raises(RedisCredentialUnavailable, match="unavailable"):
+        create_redis_client(config)
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -303,6 +445,8 @@ def test_plugin_declares_only_validated_namespaced_capabilities() -> None:
         {
             "transport.redis.streams",
             "transport.redis.consumer-group",
+            "transport.redis.sentinel",
+            "transport.redis.credential-reference",
             "operation.training.single_worker",
             "operation.training.distributed",
             "operation.batch_inference.single_worker",

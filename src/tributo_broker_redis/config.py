@@ -8,7 +8,7 @@ import socket
 import uuid
 from collections.abc import Mapping
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -16,18 +16,131 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 OperationType = Literal["training", "batch_inference"]
 ExecutionProfile = Literal["single_worker", "distributed"]
+RedisCredentialReference = Annotated[
+    str,
+    Field(pattern=r"^(?:env:[A-Za-z_][A-Za-z0-9_]*|mount:/[^\x00\r\n]+)$"),
+]
+
+_DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
 
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
 
-class RedisTransportConfig(_StrictModel):
-    """Standalone Redis connection used by the consumer and Ray driver."""
+def _validate_redis_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
+        raise ValueError("Redis URL must use redis:// or rediss:// with a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Redis URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Redis URL must not contain query or fragment")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Redis URL contains an invalid port") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Redis URL contains an invalid port")
+    return value
 
-    mode: Literal["standalone"] = "standalone"
-    url: str = "redis://127.0.0.1:6379/0"
+
+def _validate_sentinel_nodes(value: tuple[str, ...]) -> tuple[str, ...]:
+    if len(set(value)) != len(value):
+        raise ValueError("Redis Sentinel nodes must be unique")
+    for node in value:
+        if not node or node != node.strip() or any(char.isspace() for char in node):
+            raise ValueError("Redis Sentinel node must use host:port")
+        parsed = urlsplit(f"redis://{node}")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Redis Sentinel node contains an invalid port") from exc
+        if (
+            not parsed.hostname
+            or port is None
+            or not 1 <= port <= 65535
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Redis Sentinel node must use host:port")
+    return value
+
+
+class RedisConnectionConfig(_StrictModel):
+    """Credential-free standalone or Sentinel Redis connection descriptor."""
+
+    mode: Literal["standalone", "sentinel"] = "standalone"
+    url: str | None = None
+    sentinel_nodes: tuple[str, ...] = ()
+    sentinel_master: str | None = Field(default=None, min_length=1, max_length=256)
+    database: int = Field(default=0, ge=0)
+    password_ref: RedisCredentialReference | None = None
+    sentinel_password_ref: RedisCredentialReference | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_standalone_url(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            normalized = dict(value)
+            if normalized.get("mode", "standalone") == "standalone":
+                normalized.setdefault("url", _DEFAULT_REDIS_URL)
+            return normalized
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def _credential_free_url(cls, value: str | None) -> str | None:
+        return _validate_redis_url(value)
+
+    @field_validator("sentinel_nodes")
+    @classmethod
+    def _valid_sentinel_nodes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_sentinel_nodes(value)
+
+    @field_validator("sentinel_master")
+    @classmethod
+    def _trimmed_sentinel_master(cls, value: str | None) -> str | None:
+        if value is not None and value != value.strip():
+            raise ValueError(
+                "Redis Sentinel master must not have surrounding whitespace"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _mode_specific_connection(self) -> RedisConnectionConfig:
+        if self.mode == "standalone":
+            if self.url is None:
+                raise ValueError("standalone Redis requires url")
+            if (
+                self.sentinel_nodes
+                or self.sentinel_master is not None
+                or self.sentinel_password_ref is not None
+                or self.database != 0
+            ):
+                raise ValueError(
+                    "standalone Redis does not accept Sentinel connection fields"
+                )
+            return self
+        if self.url is not None:
+            raise ValueError("Redis Sentinel mode does not accept url")
+        if not self.sentinel_nodes:
+            raise ValueError("Redis Sentinel mode requires sentinel_nodes")
+        if self.sentinel_master is None:
+            raise ValueError("Redis Sentinel mode requires sentinel_master")
+        return self
+
+
+class RedisTransportConfig(RedisConnectionConfig):
+    """Redis connection used by the consumer and Ray driver."""
+
     driver_url: str | None = None
+    driver_sentinel_nodes: tuple[str, ...] | None = None
     block_ms: int = Field(default=1000, ge=1, le=60000)
     claim_idle_ms: int = Field(default=60000, ge=0)
     claim_count: int = Field(default=10, ge=1, le=1000)
@@ -35,23 +148,52 @@ class RedisTransportConfig(_StrictModel):
     max_event_bytes: int = Field(default=1024 * 1024, ge=1)
     max_stream_length: int = Field(default=1000, ge=1)
 
-    @field_validator("url", "driver_url")
+    @field_validator("driver_url")
     @classmethod
-    def _credential_free_url(cls, value: str | None) -> str | None:
+    def _credential_free_driver_url(cls, value: str | None) -> str | None:
+        return _validate_redis_url(value)
+
+    @field_validator("driver_sentinel_nodes")
+    @classmethod
+    def _valid_driver_sentinel_nodes(
+        cls, value: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
         if value is None:
             return None
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
-            raise ValueError("Redis URL must use redis:// or rediss:// with a host")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Redis URL must not contain credentials")
-        if parsed.query or parsed.fragment:
-            raise ValueError("Redis URL must not contain query or fragment")
-        return value
+        if not value:
+            raise ValueError("driver_sentinel_nodes must not be empty")
+        return _validate_sentinel_nodes(value)
+
+    @model_validator(mode="after")
+    def _mode_specific_driver_connection(self) -> RedisTransportConfig:
+        if self.mode == "standalone" and self.driver_sentinel_nodes is not None:
+            raise ValueError("standalone Redis does not accept driver_sentinel_nodes")
+        if self.mode == "sentinel" and self.driver_url is not None:
+            raise ValueError("Redis Sentinel mode does not accept driver_url")
+        return self
 
     @property
     def ray_driver_url(self) -> str:
+        if self.mode != "standalone" or self.url is None:
+            raise ValueError("Redis Sentinel transport does not have a driver URL")
         return self.driver_url or self.url
+
+    def ray_driver_connection(self) -> RedisConnectionConfig:
+        """Return the credential-free connection descriptor for the Ray driver."""
+        if self.mode == "standalone":
+            return RedisConnectionConfig(
+                mode="standalone",
+                url=self.ray_driver_url,
+                password_ref=self.password_ref,
+            )
+        return RedisConnectionConfig(
+            mode="sentinel",
+            sentinel_nodes=self.driver_sentinel_nodes or self.sentinel_nodes,
+            sentinel_master=self.sentinel_master,
+            database=self.database,
+            password_ref=self.password_ref,
+            sentinel_password_ref=self.sentinel_password_ref,
+        )
 
 
 class ChannelConfig(_StrictModel):
@@ -289,6 +431,8 @@ __all__ = [
     "OperationType",
     "ProtocolProfileConfig",
     "RedisBrokerConfig",
+    "RedisConnectionConfig",
+    "RedisCredentialReference",
     "RedisTransportConfig",
     "normalize_config",
 ]
