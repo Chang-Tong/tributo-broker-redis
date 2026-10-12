@@ -7,9 +7,20 @@ import re
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from tributo_broker_redis.config import ExecutionProfile, OperationType
+from tributo_broker_redis.config import (
+    ExecutionProfile,
+    OperationType,
+    RedisConnectionConfig,
+)
 
 PROTOCOL_PROFILE = "tributo-generic-v1"
 PROTOCOL_VERSION = "1.0"
@@ -69,7 +80,8 @@ class DriverInput(_StrictModel):
     ray_job_id: str | None = None
     credential_ref: CredentialReference | None = None
     operation_payload: dict[str, Any]
-    redis_url: str
+    redis_transport: RedisConnectionConfig | None = None
+    redis_url: str | None = None
     event_stream_prefix: str
     outer_identity_field: str = Field(
         default="operation_id",
@@ -77,6 +89,23 @@ class DriverInput(_StrictModel):
     )
     max_event_bytes: int
     max_stream_length: int
+
+    @model_validator(mode="after")
+    def _one_redis_connection(self) -> DriverInput:
+        if (self.redis_transport is None) == (self.redis_url is None):
+            raise ValueError(
+                "driver input requires exactly one Redis connection descriptor"
+            )
+        return self
+
+    @property
+    def redis_connection(self) -> RedisConnectionConfig | str:
+        """Return the current descriptor or a legacy standalone URL."""
+        if self.redis_transport is not None:
+            return self.redis_transport
+        if self.redis_url is None:
+            raise ValueError("driver Redis connection is unavailable")
+        return self.redis_url
 
 
 class ProtocolFailure(Exception):
