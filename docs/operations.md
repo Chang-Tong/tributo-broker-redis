@@ -42,6 +42,14 @@ configured Stream are eligible for delivery. `block_ms` must be a positive,
 finite timeout; explicit zero-timeout polls are issued without Redis `BLOCK`
 and are therefore nonblocking.
 
+On process restart, the provider first lists active Ray Jobs created by the
+configured driver entry point and rebuilds its in-memory watcher state from
+credential-free Ray metadata. It then claims eligible pending Redis deliveries.
+When a claimed delivery exactly matches an active operation/run/attempt/digest,
+the provider republishes `ACCEPTED` with the recovered submission identity and
+ACKs it without creating a second Ray Job. This is a bounded best-effort repair
+for the submit-before-ACK crash window, not a durable exactly-once protocol.
+
 ## Cancellation
 
 Each operation has an independent cancel key prefix.
@@ -54,12 +62,18 @@ Each operation has an independent cancel key prefix.
 - If Ray already reports `SUCCEEDED` or `FAILED`, a later cancel key has no
   effect.
 - If Ray reports `STOPPED` without a provider stop request, the watcher removes
-  the process-local active entry without publishing `CANCELLED`. Consumers must
-  use the accepted `submission_id` to inspect Ray status; v0.1 does not invent a
-  provider cancellation reason for an external stop.
+  the process-local active entry and publishes `FAILED` with
+  `RAY_JOB_STOPPED`; it does not invent a provider cancellation reason.
+- If Ray reaches `FAILED` or `SUCCEEDED` without a terminal provider event, the
+  watcher publishes a fail-closed `FAILED` event. For `SUCCEEDED`, the code is
+  `TERMINAL_EVENT_MISSING` because a successful Ray status alone does not prove
+  that the result receipt was published.
 
-The active operation map is process-local. Restart recovery and cooperative
-worker cancellation are not v0.1 guarantees.
+The active operation map remains process-local, but restart reconstructs active
+entries whose Ray metadata exactly matches the current channels and driver
+entry point. Missing, malformed, terminal, or foreign job metadata is ignored.
+Cooperative worker cancellation and complete restart recovery are not v0.1
+guarantees.
 
 The watcher checks for an existing terminal event before requesting a stop,
 but artifact persistence and event publication are not transactional in v0.1.

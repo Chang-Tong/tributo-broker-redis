@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from conftest import inference_request, training_config
 from pydantic import ValidationError
+from redis.exceptions import TimeoutError
 from tributo.integrations.broker import TaskDisposition
 from tributo.ray_jobs import RayJobSubmission
 
@@ -111,6 +112,21 @@ def test_consumer_poll_forwards_exact_timeout_and_zero_is_nonblocking(
     assert client.xreadgroup.call_args.kwargs["block"] is None
     assert consumer.poll(10_000) is None
     assert client.xreadgroup.call_args.kwargs["block"] == 10_000
+
+
+def test_consumer_poll_treats_redis_socket_timeout_as_empty_poll(
+    config: RedisBrokerConfig,
+) -> None:
+    client = MagicMock()
+    client.xreadgroup.side_effect = TimeoutError("timed out")
+    consumer = RedisTaskConsumer(
+        client,
+        config.transport,
+        config.channels.training,
+        "training",
+    )
+
+    assert consumer.poll(config.transport.block_ms) is None
 
 
 def test_configured_outer_identity_field_is_normalized_for_tasks_and_events(
