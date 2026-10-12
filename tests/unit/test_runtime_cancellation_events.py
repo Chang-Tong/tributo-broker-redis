@@ -15,6 +15,7 @@ from tributo_broker_redis.cancellation import (
     ActiveSubmission,
     ActiveSubmissionMap,
     CancelWatcher,
+    terminal_event_published,
 )
 from tributo_broker_redis.config import (
     OperationType,
@@ -1022,10 +1023,44 @@ def test_terminal_event_is_found_when_a_later_nonterminal_event_exists(
     assert len(fake_redis.events[stream]) == event_count
 
 
+def test_terminal_event_matcher_is_opt_in(
+    config: RedisBrokerConfig, fake_redis: FakeRedis
+) -> None:
+    item = ActiveSubmission(
+        operation_id="external-operation",
+        operation_type="training",
+        execution_profile="distributed",
+        run_id="external-operation",
+        channel=config.channels.training,
+        submission=RayJobSubmission(
+            run_id="external-operation",
+            attempt_id="attempt-1",
+            submission_id="ray-submission",
+        ),
+    )
+    fake_redis.xadd(
+        item.channel.event_stream_key(item.operation_id),
+        {
+            "payload": json.dumps(
+                {"event_type": "COMPLETED", "external_id": item.operation_id}
+            )
+        },
+    )
+
+    assert not terminal_event_published(fake_redis, item)
+    assert terminal_event_published(
+        fake_redis,
+        item,
+        lambda event, active: event.get("external_id") == active.operation_id,
+    )
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "FAILED", "STOPPED", "SUCCEEDED"])
 def test_start_recovers_pending_deliveries_and_active_ray_jobs(
     config: RedisBrokerConfig,
     fake_redis: FakeRedis,
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
     recovered: list[str] = []
 
@@ -1039,7 +1074,7 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
         recover_pending,
     )
     job = SimpleNamespace(
-        status="RUNNING",
+        status=status,
         submission_id="submission-recovered",
         job_id="ray-job-recovered",
         metadata={
@@ -1054,6 +1089,8 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
             ),
             "tributo.task_stream": config.channels.training.task_stream_key,
             "tributo.request_digest": "a" * 64,
+            "tributo.received_at_ms": "1000",
+            "tributo.deadline_at_ms": "9999999999999",
         },
     )
     runtime = RedisBrokerRuntime(
@@ -1073,6 +1110,27 @@ def test_start_recovers_pending_deliveries_and_active_ray_jobs(
     assert item.run_id == "run-recovered"
     assert item.submission.attempt_id == "attempt-2"
     assert item.submission.request_digest == "a" * 64
+    assert item.received_at_ms == 1000
+    assert item.deadline_at_ms == 9999999999999
+    if status != "RUNNING":
+        runtime._cancel_watcher._status_getter = lambda *args, **kwargs: status
+        runtime._cancel_watcher.check_once()
+        event = json.loads(
+            fake_redis.events[
+                config.channels.training.event_stream_key(item.operation_id)
+            ][-1]["payload"]
+        )
+        assert event["event_type"] == "FAILED"
+        assert runtime.active_submissions.get(item.operation_id) is None
+        runtime.close()
+        # A later restart must not publish the fallback again.
+        restarted = RedisBrokerRuntime(
+            config, redis_client=fake_redis, job_lister=lambda _url: [job]
+        )
+        monkeypatch.setattr(restarted._cancel_watcher, "start", lambda: None)
+        restarted.start()
+        assert restarted.active_submissions.snapshot() == ()
+        restarted.close()
 
 
 def test_recovered_delivery_reuses_active_ray_job_without_resubmission(
@@ -1186,3 +1244,91 @@ def test_recovered_delivery_without_digest_is_not_acked_as_identical(
     assert runtime.run_once(timeout_ms=0) is True
     assert submitter.calls == []
     assert fake_redis.acked == []
+
+
+def test_cancel_marker_wins_over_invalid_json(
+    config: RedisBrokerConfig, fake_redis: FakeRedis
+) -> None:
+    channel = config.channels.training
+    fake_redis.cancelled.add(channel.cancel_key("cancel-invalid"))
+    fake_redis.messages[channel.task_stream_key] = [
+        ("20-0", {"operation_id": "cancel-invalid", "payload": "{"})
+    ]
+    runtime = RedisBrokerRuntime(
+        config,
+        redis_client=fake_redis,
+        submitter=lambda *a, **k: pytest.fail("must not submit"),
+    )
+    assert runtime.run_once(timeout_ms=0)
+    event = json.loads(
+        fake_redis.events[channel.event_stream_key("cancel-invalid")][-1]["payload"]
+    )
+    assert event["event_type"] == "CANCELLED"
+    assert fake_redis.acked[-1][-1] == "20-0"
+
+
+def test_invalid_utf8_is_acked_and_next_delivery_still_consumed(
+    config: RedisBrokerConfig, fake_redis: FakeRedis
+) -> None:
+    channel = config.channels.training
+    fake_redis.messages[channel.task_stream_key] = [
+        ("21-0", cast(Any, {b"operation_id": b"bad", b"payload": b"\xff"})),
+        ("22-0", {"operation_id": "next", "payload": "{"}),
+    ]
+    runtime = RedisBrokerRuntime(config, redis_client=fake_redis)
+    assert runtime.run_once(timeout_ms=0)
+    assert runtime.run_once(timeout_ms=0)
+    assert [entry[-1] for entry in fake_redis.acked] == ["21-0", "22-0"]
+    event = json.loads(
+        fake_redis.events[channel.event_stream_key("bad")][-1]["payload"]
+    )
+    assert event["payload"]["error_code"] == "INVALID_PAYLOAD"
+
+
+def test_deadline_stops_native_ray_job_then_reports_timeout(
+    config: RedisBrokerConfig, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = ActiveSubmission(
+        operation_id="deadline",
+        operation_type="batch_inference",
+        execution_profile="distributed",
+        run_id="deadline",
+        channel=config.channels.batch_inference,
+        submission=RayJobSubmission(
+            run_id="deadline", attempt_id="attempt-1", submission_id="ray-deadline"
+        ),
+        received_at_ms=1000,
+        deadline_at_ms=2000,
+    )
+    active = ActiveSubmissionMap()
+    active.put(item)
+    states = iter(["RUNNING", "STOPPED"])
+    stopped: list[str] = []
+    monkeypatch.setattr("tributo_broker_redis.cancellation.time.time", lambda: 3.0)
+
+    def stop(job: str, **_kwargs: Any) -> bool:
+        stopped.append(job)
+        return True
+
+    watcher = CancelWatcher(
+        fake_redis,
+        active,
+        dashboard_url="http://ray:8265",
+        interval_seconds=1,
+        max_event_bytes=4096,
+        max_stream_length=100,
+        status_getter=lambda *a, **k: next(states),
+        stopper=stop,
+    )
+    watcher.check_once()
+    assert stopped == ["ray-deadline"]
+    assert not fake_redis.events
+    watcher.check_once()
+    event = json.loads(
+        fake_redis.events[item.channel.event_stream_key(item.operation_id)][-1][
+            "payload"
+        ]
+    )
+    assert event["event_type"] == "FAILED"
+    assert event["payload"]["error_code"] == "EXECUTION_TIMEOUT"
+    assert active.snapshot() == ()
