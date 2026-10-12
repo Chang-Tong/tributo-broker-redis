@@ -192,6 +192,7 @@ def test_runtime_rejects_unknown_outer_envelope_fields(
     config: RedisBrokerConfig,
 ) -> None:
     client = MagicMock()
+    client.exists.return_value = 0
     client.xreadgroup.return_value = [
         (
             config.channels.training.task_stream_key,

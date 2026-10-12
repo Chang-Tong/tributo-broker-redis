@@ -51,6 +51,9 @@ class RedisEventReporter:
         outer_identity_field: str = "operation_id",
         max_event_bytes: int = 1024 * 1024,
         max_stream_length: int = 1000,
+        received_at_ms: int | None = None,
+        deadline_at_ms: int | None = None,
+        cancel_key: str | None = None,
     ) -> None:
         self._redis = redis_client
         self._stream = f"{event_stream_prefix}:{operation_id}"
@@ -66,6 +69,11 @@ class RedisEventReporter:
         }
         self._max_event_bytes = max_event_bytes
         self._max_stream_length = max_stream_length
+        self._received_at_ms = (
+            int(received_at_ms) if received_at_ms is not None else None
+        )
+        self._deadline_at_ms = deadline_at_ms
+        self._cancel_key = cancel_key
 
     @property
     def stream_key(self) -> str:
@@ -116,13 +124,21 @@ class RedisEventReporter:
             {"level": level, "message": message[:4096]},
         )
 
-    def failed(self, code: str, error_type: str, phase: str) -> dict[str, Any]:
+    def failed(
+        self,
+        code: str,
+        error_type: str,
+        phase: str,
+        *,
+        sanitized_message: str = "operation failed",
+    ) -> dict[str, Any]:
+        """Publish a caller-approved summary; never pass raw external exceptions."""
         return self.publish(
             "FAILED",
             {
                 "error_code": code,
                 "error_type": error_type,
-                "sanitized_message": "operation failed",
+                "sanitized_message": sanitized_message,
                 "retryable": False,
             },
             phase=phase,

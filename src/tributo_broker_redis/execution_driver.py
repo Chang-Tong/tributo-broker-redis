@@ -9,6 +9,7 @@ import re
 import sys
 from pathlib import Path
 
+from tributo_broker_redis.driver_transport import read_driver_input
 from tributo_broker_redis.protocol import DriverInput
 from tributo_broker_redis.redis_client import create_redis_client
 from tributo_broker_redis.reporter import RedisEventReporter
@@ -27,9 +28,7 @@ class _TerminalEventPublicationError(Exception):
 
 
 def _load_driver_input() -> tuple[DriverInput, str]:
-    raw = os.environ.get(_DRIVER_ENV)
-    if raw is None:
-        raise ValueError(f"{_DRIVER_ENV} is required")
+    raw = read_driver_input(os.environ)
     try:
         decoded = base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
     except Exception:

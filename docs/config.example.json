@@ -9,6 +9,7 @@
     "claim_idle_ms": 60000,
     "claim_count": 10,
     "max_payload_bytes": 1048576,
+    "max_driver_input_bytes": 262144,
     "max_event_bytes": 1048576,
     "max_stream_length": 1000
   },

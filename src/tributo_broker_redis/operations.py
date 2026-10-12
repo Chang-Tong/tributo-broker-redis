@@ -27,6 +27,7 @@ class MappingFailure(Exception):
 class PreparedOperation:
     operation_payload: dict[str, Any]
     credential_ref: str | None
+    timeout_seconds: float | None = None
 
 
 def prepare_operation(request: GenericRequest) -> PreparedOperation:

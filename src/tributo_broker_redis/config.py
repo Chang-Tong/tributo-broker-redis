@@ -145,6 +145,7 @@ class RedisTransportConfig(RedisConnectionConfig):
     claim_idle_ms: int = Field(default=60000, ge=0)
     claim_count: int = Field(default=10, ge=1, le=1000)
     max_payload_bytes: int = Field(default=1024 * 1024, ge=1)
+    max_driver_input_bytes: int = Field(default=256 * 1024, ge=1)
     max_event_bytes: int = Field(default=1024 * 1024, ge=1)
     max_stream_length: int = Field(default=1000, ge=1)
 
