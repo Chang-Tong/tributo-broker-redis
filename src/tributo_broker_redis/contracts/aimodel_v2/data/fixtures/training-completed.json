@@ -1,0 +1,91 @@
+{
+  "protocol_version": "2.0",
+  "job_id": "train-contract-1",
+  "event_type": "COMPLETED",
+  "timestamp": 1781161200000,
+  "phase": "COMPLETED",
+  "progress_percent": 100,
+  "duration_seconds": 1.0,
+  "result_summary": {
+    "primary_metric": {
+      "name": "auc",
+      "value": 0.9
+    },
+    "sample_rows": {
+      "total": 20,
+      "train": 14,
+      "validation": 3,
+      "test": 3
+    }
+  },
+  "training_result": {
+    "algorithm_key": "xgboost",
+    "task_type": "BINARY_CLASSIFICATION",
+    "model_features": [
+      {
+        "feature_id": "f001",
+        "model_feature_index": 0,
+        "model_feature_name": "opaque_feature_A",
+        "transformation": "PASSTHROUGH"
+      },
+      {
+        "feature_id": "f002",
+        "model_feature_index": 1,
+        "model_feature_name": "opaque_feature_B",
+        "transformation": "PASSTHROUGH"
+      }
+    ],
+    "evaluation": {
+      "eval_type": "BINARY_CLASSIFICATION",
+      "sample_rows": 3,
+      "metrics": [
+        {
+          "metric_name": "auc",
+          "value": 0.9
+        }
+      ],
+      "details": {}
+    },
+    "feature_analysis": {},
+    "tuning_result": null
+  },
+  "artifact_manifest": {
+    "tenant_id": "tenant",
+    "model_id": "model",
+    "version_id": "v1",
+    "created_at": "2026-10-29T00:00:00Z",
+    "algorithm_key": "xgboost",
+    "storage": {
+      "type": "nas",
+      "bucket": "/models",
+      "prefix": "tenant/model/v1/",
+      "properties": {}
+    },
+    "model_artifacts": {
+      "model_weights": {
+        "required_for_inference": true,
+        "alternatives": [
+          {
+            "format": "onnx",
+            "files": [
+              {
+                "path": "weights/model.onnx",
+                "size": 10,
+                "hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "metadata": {
+                  "input_names": [
+                    "float_input"
+                  ],
+                  "output_names": [
+                    "label",
+                    "probabilities"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

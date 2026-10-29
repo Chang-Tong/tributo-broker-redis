@@ -1,0 +1,35 @@
+{
+  "algorithm": "xgboost",
+  "config": {
+    "ingestion": {
+      "source": {
+        "type": "csv",
+        "path": "/data/train.csv"
+      },
+      "engine": "ray"
+    },
+    "feature_names": [
+      "x1",
+      "x2"
+    ],
+    "label_name": "label",
+    "worker_count": 2,
+    "task_type": "BINARY_CLASSIFICATION",
+    "model": {
+      "objective": "binary:logistic",
+      "max_depth": 3
+    },
+    "training": {
+      "num_rounds": 100,
+      "train_ratio": 0.7,
+      "validation_ratio": 0.15,
+      "test_ratio": 0.15
+    },
+    "resources": {
+      "num_cpus": 1,
+      "num_gpus": 0
+    },
+    "storage_path": "/shared/ray-results",
+    "bundle_uri": "/shared/models"
+  }
+}

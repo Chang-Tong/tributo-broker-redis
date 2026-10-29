@@ -1,11 +1,18 @@
 # Tributo Redis Streams provider
 
 `tributo-broker-redis` is an independently installed Redis Streams provider
-for Tributo Broker API v1. The v0.1 Alpha supports a public
+for Tributo Broker API v1. The generic Alpha profile supports a public
 `tributo-generic-v1` protocol and delegates execution to Tributo public APIs.
 Redis remains outside Tributo Core.
 
-The release gate covers these healthy paths:
+Version 0.3 owns the optional `aimodel-v2` training/inference profile,
+migrated from the KnoVa integration. Its parser, structural validators, event
+reporter, request mapping, and Ray execution driver live in
+`tributo_broker_redis.profiles.aimodel_v2`. No KnoVa installation is required.
+See [the v2 profile guide](docs/aimodel-v2.md) for dependencies, configuration,
+compatibility, and the current execution limits.
+
+The generic v1 release gate covers these healthy paths:
 
 - XGBoost training with `single_worker` and `distributed` profiles;
 - Bundle-backed batch inference with `single_worker` and `distributed` profiles;
@@ -16,7 +23,7 @@ The release gate covers these healthy paths:
   metadata, without resubmitting an exact recovered delivery;
 - queued cancellation and running cancellation through Ray Jobs stop.
 
-Unknown protocol fields and unsupported algorithms or profiles fail closed.
+For generic v1, unknown protocol fields and unsupported algorithms or profiles fail closed.
 This release does not promise cross-restart exactly-once behavior, durable
 events, complete recovery, DLQ processing, Redis Cluster, or exactly-once HA.
 
@@ -27,16 +34,16 @@ contract and this package:
 
 ```bash
 pip install /path/to/validated/tributo-1.0.0-py3-none-any.whl \
-  tributo-broker-redis
+  'dist/tributo_broker_redis-0.3.0-py3-none-any.whl[xgboost]'
 ```
 
-The provider dependency range remains `tributo>=1.0,<2.0`, but v0.1 deployment
-must select a Core 1.0.0 build containing the runtime-env extension. The
-package registers the `tributo-redis` entry point in `tributo.brokers`.
-Compatibility is verified against the pinned Core baseline by static typing,
-the wheel contract, and the Redis/Ray integration matrix. Configuration
-validation checks the Core project root and configured extension paths before
-any Redis delivery can be consumed.
+The supported Core baseline is `Chang-Tong/Tributo@1eaae848ef7f6acbd600c87771f91f9291f00b3e`.
+Both profiles use that current Core. Install the `xgboost` extra for generic
+training, or `aimodel-v2` for the external protocol. These install the official
+algorithm package; XGBoost is no longer provided by an in-Core legacy trainer.
+Broad package version ranges do not establish compatibility with older Core
+builds sharing version 1.0.0. Configuration validates deployment paths before
+Redis delivery consumption.
 
 ## Configuration
 
@@ -127,10 +134,19 @@ fields are:
 }
 ```
 
-Training `spec` uses `algorithm: "xgboost"` and a validated Tributo XGBoost
-`config` whose output is `bundle_uri`. Batch inference uses
-`profile: "bundle-backed"` and a strict Tributo `InferenceRequest` under
-`request`.
+Training `spec` uses `algorithm: "xgboost"` and the current
+[explicit training configuration](docs/training.current.example.json).
+`config.ingestion` is Core's public `IngestionRequest`; feature/label names,
+worker count, resources, storage, and Bundle destination are explicit.
+`single_worker` requires one worker and `distributed` requires at least two.
+Results contain the public `AlgorithmRunResult`: `result.execution.status`,
+metrics/outputs, input provenance, and worker evidence, with a Bundle reference.
+
+Version 0.3 deliberately rejects the retired `config.data`, `config.ray`,
+`config.output`, `val_size`, and `test_size` trainer formats. Use split ratios
+and the current fields instead. The removed Core trainer module and its result
+methods are not restored. Batch inference continues to use
+`profile: "bundle-backed"` and a public `InferenceRequest` under `request`.
 
 After deterministic Ray admission the provider publishes `ACCEPTED` and ACKs
 the Redis delivery. The single Ray execution driver publishes `PHASE`, `LOG`,
@@ -163,3 +179,12 @@ TRIBUTO_CORE_ROOT=/path/to/tributo-core \
 BROKER_RAY_IMAGE=tributo-runtime-full:local \
 ./scripts/run_it.sh
 ```
+
+## External v2 contract CI
+
+Broker currently executes a subset of the external protocol. Shared JSON Schema,
+request vectors, event/result semantics, backend evidence and live Ray evidence
+checks are available through `tributo-broker-contract` (`contracts` extra).
+See [protocol conformance and CI integration](docs/protocol-conformance.md) for the
+locked specification, explicit gaps, reusable workflows and evidence format.
+Passing a schema or a substituted executor test is not full runtime compatibility.

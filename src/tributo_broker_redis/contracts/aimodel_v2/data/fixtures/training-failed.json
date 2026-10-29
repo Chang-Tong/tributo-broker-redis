@@ -1,0 +1,10 @@
+{
+  "protocol_version": "2.0",
+  "job_id": "train-contract-1",
+  "event_type": "FAILED",
+  "timestamp": 1781161200000,
+  "phase": "TRAINING",
+  "duration_seconds": 1,
+  "error_code": "TRAINING_FAILED",
+  "error_message": "safe failure"
+}

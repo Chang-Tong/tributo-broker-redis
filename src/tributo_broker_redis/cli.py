@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import signal
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,20 @@ from typing import Any
 from tributo_broker_redis.config import normalize_config
 from tributo_broker_redis.plugin import RedisBrokerPlugin
 from tributo_broker_redis.runtime import RedisBrokerRuntime
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _configure_logging(level: str | None) -> None:
+    selected = (level or os.environ.get("TRIBUTO_LOG_LEVEL") or "INFO").upper()
+    if selected not in _LOG_LEVELS:
+        raise ValueError("log level must be one of: " + ", ".join(_LOG_LEVELS))
+    logging.basicConfig(
+        level=getattr(logging, selected),
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logging.getLogger().setLevel(getattr(logging, selected))
 
 
 def _read_config(path: Path) -> dict[str, Any]:
@@ -29,6 +45,13 @@ def _parser() -> argparse.ArgumentParser:
     consume = commands.add_parser("consume", help="run the provider consume loop")
     consume.add_argument("--config", type=Path, required=True)
     consume.add_argument("--once", action="store_true")
+    consume.add_argument(
+        "--log-level",
+        choices=_LOG_LEVELS,
+        default=None,
+        type=str.upper,
+        help="consumer log level (default: TRIBUTO_LOG_LEVEL or INFO)",
+    )
     return parser
 
 
@@ -43,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         print("Redis broker configuration is valid")
         return 0
 
-    runtime = RedisBrokerRuntime(normalize_config(raw))
+    _configure_logging(args.log_level)
+    if normalize_config(raw).protocol.profile == "aimodel-v2":
+        runtime = RedisBrokerPlugin().create_runtime(raw)
+    else:
+        runtime = RedisBrokerRuntime(normalize_config(raw))
 
     def _stop(_signum: int, _frame: object) -> None:
         runtime.close()

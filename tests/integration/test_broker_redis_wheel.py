@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,6 +12,39 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 pytestmark = pytest.mark.integration
+
+
+def test_v2_profile_is_importable_without_knova() -> None:
+    code = """
+import importlib.abc, sys
+class BlockKnova(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'tributo_knova' or fullname.startswith('tributo_knova.'):
+            raise AssertionError('Broker imports must not depend on KnoVa')
+sys.meta_path.insert(0, BlockKnova())
+from tributo_broker_redis.profiles.aimodel_v2 import broker, protocol
+from tributo_broker_redis.profiles.aimodel_v2 import reporter, validation
+from tributo_broker_redis.protocol import ProtocolFailure
+assert broker.DRIVER_ENTRYPOINT.startswith('python -m tributo_broker_redis.')
+try:
+    protocol.parse_request(
+        '{"protocol_version":"3.0"}', outer_operation_id='job',
+        expected_operation_type='training'
+    )
+except ProtocolFailure as error:
+    assert error.code == 'UNSUPPORTED_PROTOCOL_VERSION'
+else:
+    raise AssertionError('unsupported protocol was accepted')
+assert not any(name.startswith('tributo_knova') for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_installed_provider_is_discoverable_through_tributo_entry_points() -> None:
@@ -34,7 +70,7 @@ def test_installed_core_accepts_provider_runtime_env_contract(
         "JobInfo", (), {"job_id": "ray-core-job-contract"}
     )()
     extension_modules: list[str | Path] = [tmp_path / "provider-module"]
-    runtime_packages = ["/provider/tributo_broker_redis-0.1.0-py3-none-any.whl"]
+    runtime_packages = ["/provider/tributo_broker_redis-0.3.0-py3-none-any.whl"]
     runtime_env = {
         "py_modules": [str(tmp_path / "tributo"), *map(str, extension_modules)],
         "pip": list(runtime_packages),

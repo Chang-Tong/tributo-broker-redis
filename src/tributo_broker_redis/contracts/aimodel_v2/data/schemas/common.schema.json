@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tributo.dev/contracts/aimodel-v2/common.schema.json",
+  "$defs": {
+    "origin": {
+      "type": "object",
+      "properties": {
+        "table_alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "column_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "column_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "table_alias",
+        "column_name",
+        "column_type"
+      ],
+      "additionalProperties": true
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "$ref": "common.schema.json#/$defs/origin"
+        },
+        "result_column": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "origin",
+        "result_column"
+      ],
+      "additionalProperties": true
+    },
+    "feature": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "$ref": "common.schema.json#/$defs/origin"
+        },
+        "result_column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "feature_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "feature_role": {
+          "enum": [
+            "REGULAR",
+            "TEMPORAL_KEY",
+            "KNOWN_FUTURE"
+          ]
+        },
+        "treatment": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "result_column",
+        "feature_id",
+        "display_name",
+        "feature_role"
+      ],
+      "additionalProperties": true
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "table_alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "database_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "enum": [
+            "PRIMARY",
+            "JOINED"
+          ]
+        }
+      },
+      "required": [
+        "table_alias",
+        "database_name",
+        "table_name",
+        "role"
+      ],
+      "additionalProperties": true
+    },
+    "relation": {
+      "type": "object",
+      "properties": {
+        "left_alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "right_alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "join_type": {
+          "enum": [
+            "INNER",
+            "LEFT"
+          ]
+        },
+        "on": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "left_column": {
+                "type": "string",
+                "minLength": 1
+              },
+              "right_column": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "left_column",
+              "right_column"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "left_alias",
+        "right_alias",
+        "join_type",
+        "on"
+      ],
+      "additionalProperties": true
+    },
+    "query": {
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_sql": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sql"
+      ],
+      "additionalProperties": true
+    },
+    "datasource": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "CLICKHOUSE",
+            "DORIS",
+            "HIVE",
+            "JDBC"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "database_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_string": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "host",
+        "port",
+        "database_name"
+      ],
+      "additionalProperties": true
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "/$"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "bucket",
+        "prefix"
+      ],
+      "additionalProperties": true
+    },
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-fA-F0-9]{64}$"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "hash"
+      ],
+      "additionalProperties": true
+    },
+    "artifact-entry": {
+      "type": "object",
+      "properties": {
+        "comment": {
+          "type": "string"
+        },
+        "required_for_inference": {
+          "type": "boolean"
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "format": {
+                "enum": [
+                  "onnx",
+                  "sklearn",
+                  "spark_pipeline_model",
+                  "pytorch",
+                  "tensorflow",
+                  "tensorrt",
+                  "xgboost",
+                  "lightgbm",
+                  "ray_checkpoint",
+                  "ray_preprocessor"
+                ]
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "$ref": "common.schema.json#/$defs/file"
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "format",
+              "files"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "required_for_inference",
+        "alternatives"
+      ],
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "pipeline": {
+          "$ref": "common.schema.json#/$defs/artifact-entry"
+        },
+        "model_weights": {
+          "$ref": "common.schema.json#/$defs/artifact-entry"
+        },
+        "preprocessor": {
+          "$ref": "common.schema.json#/$defs/artifact-entry"
+        }
+      },
+      "additionalProperties": false
+    },
+    "label-map": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metric-name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    }
+  }
+}

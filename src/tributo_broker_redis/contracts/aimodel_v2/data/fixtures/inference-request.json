@@ -1,0 +1,126 @@
+{
+  "protocol_version": "2.0",
+  "execution_id": "infer-contract-1",
+  "task_id": "task",
+  "tenant_id": "tenant",
+  "model": {
+    "model_id": "model",
+    "version_id": "v1",
+    "algorithm_key": "xgboost",
+    "algorithm_category": "CLASSIFICATION",
+    "task_type": "BINARY_CLASSIFICATION",
+    "label_mapping": {
+      "否": 0,
+      "是": 1
+    },
+    "positive_label_value": "是",
+    "storage": {
+      "type": "nas",
+      "bucket": "/models",
+      "prefix": "tenant/model/v1/",
+      "properties": {}
+    },
+    "model_artifacts": {
+      "model_weights": {
+        "required_for_inference": true,
+        "alternatives": [
+          {
+            "format": "onnx",
+            "files": [
+              {
+                "path": "weights/model.onnx",
+                "size": 10,
+                "hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "metadata": {
+                  "input_names": [
+                    "float_input"
+                  ],
+                  "output_names": [
+                    "label",
+                    "probabilities"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "input": {
+    "datasource": {
+      "type": "CLICKHOUSE",
+      "host": "clickhouse",
+      "port": 8123,
+      "database_name": "analytics",
+      "username": "reader",
+      "credential_ref": "env:FIXTURE_DB_PASSWORD",
+      "properties": {}
+    },
+    "tables": [
+      {
+        "table_alias": "t0",
+        "database_name": "analytics",
+        "table_name": "samples",
+        "role": "PRIMARY"
+      }
+    ],
+    "relations": [],
+    "entity_key": {
+      "origin": {
+        "table_alias": "t0",
+        "column_name": "id",
+        "column_type": "Int64"
+      },
+      "result_column": "opaque_entity"
+    },
+    "features": [
+      {
+        "feature_id": "f001",
+        "display_name": "活跃度",
+        "feature_role": "REGULAR",
+        "origin": {
+          "table_alias": "t0",
+          "column_name": "activity",
+          "column_type": "Float64"
+        },
+        "result_column": "opaque_feature_A"
+      },
+      {
+        "feature_id": "f002",
+        "display_name": "消费",
+        "feature_role": "REGULAR",
+        "origin": {
+          "table_alias": "t0",
+          "column_name": "spend",
+          "column_type": "Float64"
+        },
+        "result_column": "opaque_feature_B"
+      }
+    ],
+    "query": {
+      "sql": "SELECT t0.id AS opaque_entity, t0.activity AS opaque_feature_A, t0.spend AS opaque_feature_B FROM analytics.samples t0 WHERE t0.month = {month:String}",
+      "params": {
+        "month": "202601"
+      }
+    }
+  },
+  "output": {
+    "datasource": {
+      "type": "CLICKHOUSE",
+      "host": "clickhouse",
+      "port": 8123,
+      "database_name": "analytics",
+      "username": "reader",
+      "credential_ref": "env:FIXTURE_DB_PASSWORD",
+      "properties": {}
+    },
+    "table_name": "ml_inference_result",
+    "result_filter": null
+  },
+  "execution": {
+    "batch_size": 32,
+    "progress_report_interval_rows": 10
+  },
+  "extensions": {}
+}

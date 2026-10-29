@@ -141,15 +141,20 @@ def inference_request(concurrency: int) -> dict[str, Any]:
 
 def training_config(num_workers: int) -> dict[str, Any]:
     return {
-        "data": {
-            "type": "csv",
-            "path": "/data/train.csv",
-            "format": "csv",
-            "label_col": "label",
-            "feature_columns": ["x1", "x2"],
+        "ingestion": {
+            "source": {"type": "csv", "path": "/data/train.csv"},
+            "engine": "ray",
         },
+        "feature_names": ["x1", "x2"],
+        "label_name": "label",
+        "worker_count": num_workers,
         "model": {"objective": "binary:logistic", "max_depth": 2},
-        "training": {"num_rounds": 2, "val_size": 0.0, "test_size": 0.0},
-        "ray": {"num_workers": num_workers, "storage_path": "/tmp/ray"},
-        "output": {"bundle_uri": "/tmp/bundles"},
+        "training": {
+            "num_rounds": 2,
+            "train_ratio": 1.0,
+            "validation_ratio": 0.0,
+            "test_ratio": 0.0,
+        },
+        "storage_path": "/tmp/ray",
+        "bundle_uri": "/tmp/bundles",
     }

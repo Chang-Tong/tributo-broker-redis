@@ -1,0 +1,1149 @@
+[
+  {
+    "id": "training-canonical",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": []
+  },
+  {
+    "id": "training-minor-2.1",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.1"
+      },
+      {
+        "op": "set",
+        "path": [
+          "unknown_optional"
+        ],
+        "value": {
+          "future": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-minor-2.99",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.99"
+      },
+      {
+        "op": "set",
+        "path": [
+          "unknown_optional"
+        ],
+        "value": {
+          "future": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-1.9",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "1.9"
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-3.0",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "3.0"
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-2",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2"
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-2.0",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": 2.0
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-None",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "id": "training-bad-version-2.x",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.x"
+      }
+    ]
+  },
+  {
+    "id": "training-missing-version",
+    "requirement": "version",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "remove",
+        "path": [
+          "protocol_version"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "training-extensions-10",
+    "requirement": "extensions",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "id": "training-extensions-11",
+    "requirement": "extensions",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": []
+      }
+    ]
+  },
+  {
+    "id": "training-extensions-12",
+    "requirement": "extensions",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": 42
+      }
+    ]
+  },
+  {
+    "id": "training-extensions-13",
+    "requirement": "extensions",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": "opaque"
+      }
+    ]
+  },
+  {
+    "id": "training-extensions-14",
+    "requirement": "extensions",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": {
+          "explanation": {
+            "enabled": "invalid"
+          },
+          "unknown": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-duplicate-feature",
+    "requirement": "features",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "features",
+          "1",
+          "feature_id"
+        ],
+        "value": "f001"
+      }
+    ]
+  },
+  {
+    "id": "training-duplicate-result-column",
+    "requirement": "features",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "features",
+          "1",
+          "result_column"
+        ],
+        "value": "opaque_feature_A"
+      }
+    ]
+  },
+  {
+    "id": "training-unknown-origin",
+    "requirement": "topology",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "features",
+          "0",
+          "origin",
+          "table_alias"
+        ],
+        "value": "undeclared"
+      }
+    ]
+  },
+  {
+    "id": "training-two-primary",
+    "requirement": "topology",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "tables",
+          "1"
+        ],
+        "value": {
+          "table_alias": "t1",
+          "database_name": "analytics",
+          "table_name": "other",
+          "role": "PRIMARY"
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-query-params-null",
+    "requirement": "sql",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "data_query",
+          "query"
+        ],
+        "value": {
+          "sql": "SELECT 1",
+          "params": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-query-param-missing",
+    "requirement": "sql",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "data_query",
+          "query",
+          "params"
+        ],
+        "value": {}
+      }
+    ]
+  },
+  {
+    "id": "training-audit-sql-opaque",
+    "requirement": "sql",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "data_query",
+          "query",
+          "resolved_sql"
+        ],
+        "value": "AUDIT-ONLY-DO-NOT-EXECUTE"
+      }
+    ]
+  },
+  {
+    "id": "training-invalid-port",
+    "requirement": "datasource",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "datasource",
+          "port"
+        ],
+        "value": 65536
+      }
+    ]
+  },
+  {
+    "id": "inference-canonical",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": []
+  },
+  {
+    "id": "inference-minor-2.1",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.1"
+      },
+      {
+        "op": "set",
+        "path": [
+          "unknown_optional"
+        ],
+        "value": {
+          "future": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-minor-2.99",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.99"
+      },
+      {
+        "op": "set",
+        "path": [
+          "unknown_optional"
+        ],
+        "value": {
+          "future": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-1.9",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "1.9"
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-3.0",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "3.0"
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-2",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2"
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-2.0",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": 2.0
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-None",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "id": "inference-bad-version-2.x",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "protocol_version"
+        ],
+        "value": "2.x"
+      }
+    ]
+  },
+  {
+    "id": "inference-missing-version",
+    "requirement": "version",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "remove",
+        "path": [
+          "protocol_version"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "inference-extensions-33",
+    "requirement": "extensions",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "id": "inference-extensions-34",
+    "requirement": "extensions",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": []
+      }
+    ]
+  },
+  {
+    "id": "inference-extensions-35",
+    "requirement": "extensions",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": 42
+      }
+    ]
+  },
+  {
+    "id": "inference-extensions-36",
+    "requirement": "extensions",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": "opaque"
+      }
+    ]
+  },
+  {
+    "id": "inference-extensions-37",
+    "requirement": "extensions",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "extensions"
+        ],
+        "value": {
+          "explanation": {
+            "enabled": "invalid"
+          },
+          "unknown": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-duplicate-feature",
+    "requirement": "features",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "features",
+          "1",
+          "feature_id"
+        ],
+        "value": "f001"
+      }
+    ]
+  },
+  {
+    "id": "inference-duplicate-result-column",
+    "requirement": "features",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "features",
+          "1",
+          "result_column"
+        ],
+        "value": "opaque_feature_A"
+      }
+    ]
+  },
+  {
+    "id": "inference-unknown-origin",
+    "requirement": "topology",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "features",
+          "0",
+          "origin",
+          "table_alias"
+        ],
+        "value": "undeclared"
+      }
+    ]
+  },
+  {
+    "id": "inference-two-primary",
+    "requirement": "topology",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "tables",
+          "1"
+        ],
+        "value": {
+          "table_alias": "t1",
+          "database_name": "analytics",
+          "table_name": "other",
+          "role": "PRIMARY"
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-query-params-null",
+    "requirement": "sql",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "query"
+        ],
+        "value": {
+          "sql": "SELECT 1",
+          "params": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-query-param-missing",
+    "requirement": "sql",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "query",
+          "params"
+        ],
+        "value": {}
+      }
+    ]
+  },
+  {
+    "id": "inference-audit-sql-opaque",
+    "requirement": "sql",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "query",
+          "resolved_sql"
+        ],
+        "value": "AUDIT-ONLY-DO-NOT-EXECUTE"
+      }
+    ]
+  },
+  {
+    "id": "inference-invalid-port",
+    "requirement": "datasource",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "input",
+          "datasource",
+          "port"
+        ],
+        "value": 65536
+      }
+    ]
+  },
+  {
+    "id": "training-split-sum",
+    "requirement": "split",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "data_split",
+          "train_ratio"
+        ],
+        "value": 0.9
+      }
+    ]
+  },
+  {
+    "id": "training-stratify-time-ordered",
+    "requirement": "split",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "data_split",
+          "strategy"
+        ],
+        "value": "TIME_ORDERED"
+      },
+      {
+        "op": "set",
+        "path": [
+          "data_split",
+          "stratify"
+        ],
+        "value": true
+      }
+    ]
+  },
+  {
+    "id": "training-target-leakage",
+    "requirement": "features",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "target",
+          "result_column"
+        ],
+        "value": "opaque_feature_A"
+      }
+    ]
+  },
+  {
+    "id": "training-negative-label",
+    "requirement": "labels",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "target",
+          "label_mapping"
+        ],
+        "value": {
+          "否": 0,
+          "是": -1
+        }
+      }
+    ]
+  },
+  {
+    "id": "training-positive-label",
+    "requirement": "labels",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "target",
+          "positive_label_value"
+        ],
+        "value": "not-a-label"
+      }
+    ]
+  },
+  {
+    "id": "training-path-traversal",
+    "requirement": "artifacts",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "storage_context",
+          "prefix"
+        ],
+        "value": "../outside/"
+      }
+    ]
+  },
+  {
+    "id": "training-reserved-random-forest",
+    "requirement": "algorithms",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "algorithm",
+          "algorithm_key"
+        ],
+        "value": "random_forest"
+      }
+    ]
+  },
+  {
+    "id": "training-doris-wire-valid",
+    "requirement": "datasource",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "datasource",
+          "type"
+        ],
+        "value": "DORIS"
+      }
+    ]
+  },
+  {
+    "id": "training-preprocessing-wire-valid",
+    "requirement": "preprocessing",
+    "kind": "training-request",
+    "fixture": "fixtures/training-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "feature_engineering"
+        ],
+        "value": {
+          "default_missing_value_strategy": "MEAN",
+          "default_scaling_method": "STANDARD"
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-missing-required-artifact",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "model_artifacts",
+          "model_weights"
+        ],
+        "value": {}
+      }
+    ]
+  },
+  {
+    "id": "inference-unknown-artifact-name",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "model_artifacts",
+          "secret_part"
+        ],
+        "value": {
+          "required_for_inference": false,
+          "alternatives": []
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-invalid-hash",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "model_artifacts",
+          "model_weights",
+          "alternatives",
+          "0",
+          "files",
+          "0",
+          "hash"
+        ],
+        "value": "not-a-digest"
+      }
+    ]
+  },
+  {
+    "id": "inference-absolute-artifact-path",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "model_artifacts",
+          "model_weights",
+          "alternatives",
+          "0",
+          "files",
+          "0",
+          "path"
+        ],
+        "value": "/etc/passwd"
+      }
+    ]
+  },
+  {
+    "id": "inference-invalid-format",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "model_artifacts",
+          "model_weights",
+          "alternatives",
+          "0",
+          "format"
+        ],
+        "value": "ONNX"
+      }
+    ]
+  },
+  {
+    "id": "inference-storage-prefix",
+    "requirement": "artifacts",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "model",
+          "storage",
+          "prefix"
+        ],
+        "value": "missing-slash"
+      }
+    ]
+  },
+  {
+    "id": "inference-filter-label",
+    "requirement": "result-filter",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": false,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "output",
+          "result_filter"
+        ],
+        "value": {
+          "mode": "INCLUDE",
+          "labels": [
+            "unknown"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "inference-valid-filter",
+    "requirement": "result-filter",
+    "kind": "inference-request",
+    "fixture": "fixtures/inference-request.json",
+    "accepted": true,
+    "changes": [
+      {
+        "op": "set",
+        "path": [
+          "output",
+          "result_filter"
+        ],
+        "value": {
+          "mode": "EXCLUDE",
+          "labels": [
+            "否"
+          ]
+        }
+      }
+    ]
+  }
+]

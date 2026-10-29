@@ -1,0 +1,316 @@
+{
+  "protocol_version": "2.0",
+  "full_protocol_compatible": false,
+  "evidence_policy": "A schema or fake executor pass is never a real runtime compatibility claim. Unimplemented clauses remain visible and strict full-protocol mode fails.",
+  "requirements": [
+    {
+      "id": "version",
+      "document": "protocol-conventions.md",
+      "section": "§1",
+      "execution_status": "supported",
+      "scope": "Major-only compatibility, absent version rejection",
+      "gate": "version",
+      "case_ids": [
+        "training-canonical",
+        "training-minor-2.1",
+        "training-minor-2.99",
+        "training-bad-version-1.9",
+        "training-bad-version-3.0",
+        "training-bad-version-2",
+        "training-bad-version-2.0",
+        "training-bad-version-None",
+        "training-bad-version-2.x",
+        "training-missing-version",
+        "inference-canonical",
+        "inference-minor-2.1",
+        "inference-minor-2.99",
+        "inference-bad-version-1.9",
+        "inference-bad-version-3.0",
+        "inference-bad-version-2",
+        "inference-bad-version-2.0",
+        "inference-bad-version-None",
+        "inference-bad-version-2.x",
+        "inference-missing-version"
+      ]
+    },
+    {
+      "id": "wire",
+      "document": "protocol-conventions.md",
+      "section": "§4",
+      "execution_status": "supported",
+      "scope": "Two Redis fields and three-way identity alignment",
+      "gate": "trace",
+      "case_ids": []
+    },
+    {
+      "id": "extensions",
+      "document": "protocol-conventions.md",
+      "section": "§8",
+      "execution_status": "supported",
+      "scope": "Opaque extensions and future fields tolerated",
+      "gate": "extensions",
+      "case_ids": [
+        "training-extensions-10",
+        "training-extensions-11",
+        "training-extensions-12",
+        "training-extensions-13",
+        "training-extensions-14",
+        "inference-extensions-33",
+        "inference-extensions-34",
+        "inference-extensions-35",
+        "inference-extensions-36",
+        "inference-extensions-37"
+      ]
+    },
+    {
+      "id": "topology",
+      "document": "training-protocol.md",
+      "section": "§1.2.3, §三",
+      "execution_status": "partial",
+      "scope": "Structural tree checks; multi-table JOIN execution unavailable",
+      "gate": "topology",
+      "case_ids": [
+        "training-unknown-origin",
+        "training-two-primary",
+        "inference-unknown-origin",
+        "inference-two-primary"
+      ]
+    },
+    {
+      "id": "features",
+      "document": "protocol-conventions.md",
+      "section": "§2, §9.1",
+      "execution_status": "supported",
+      "scope": "Opaque column names, feature identity and origin references",
+      "gate": "features",
+      "case_ids": [
+        "training-duplicate-feature",
+        "training-duplicate-result-column",
+        "inference-duplicate-feature",
+        "inference-duplicate-result-column",
+        "training-target-leakage"
+      ]
+    },
+    {
+      "id": "sql",
+      "document": "protocol-conventions.md",
+      "section": "§5, §9.2",
+      "execution_status": "partial",
+      "scope": "Parameterized scalar filter subset; arbitrary SQL/rebuild not implemented",
+      "gate": "sql",
+      "case_ids": [
+        "training-query-params-null",
+        "training-query-param-missing",
+        "training-audit-sql-opaque",
+        "inference-query-params-null",
+        "inference-query-param-missing",
+        "inference-audit-sql-opaque"
+      ]
+    },
+    {
+      "id": "datasource",
+      "document": "training-protocol.md",
+      "section": "§1.2.2",
+      "execution_status": "partial",
+      "scope": "Only ClickHouse execution; Doris/Hive/JDBC wire structures are not execution support",
+      "gate": "datasource",
+      "case_ids": [
+        "training-invalid-port",
+        "inference-invalid-port",
+        "training-doris-wire-valid"
+      ]
+    },
+    {
+      "id": "split",
+      "document": "training-protocol.md",
+      "section": "§1.2.9",
+      "execution_status": "partial",
+      "scope": "RANDOM only; stratified, time-ordered and CV execution unavailable",
+      "gate": "split",
+      "case_ids": [
+        "training-split-sum",
+        "training-stratify-time-ordered"
+      ]
+    },
+    {
+      "id": "labels",
+      "document": "inference-protocol.md",
+      "section": "§4.3",
+      "execution_status": "supported",
+      "scope": "Label/positive-class decoding for supported XGBoost tasks",
+      "gate": "labels",
+      "case_ids": [
+        "training-negative-label",
+        "training-positive-label"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "document": "training-protocol.md",
+      "section": "§2.4-A",
+      "execution_status": "partial",
+      "scope": "ONNX and XGBoost UBJ paths; other formats/chains not covered",
+      "gate": "artifacts",
+      "case_ids": [
+        "training-path-traversal",
+        "inference-missing-required-artifact",
+        "inference-unknown-artifact-name",
+        "inference-invalid-hash",
+        "inference-absolute-artifact-path",
+        "inference-invalid-format",
+        "inference-storage-prefix"
+      ]
+    },
+    {
+      "id": "preprocessing",
+      "document": "training-protocol.md",
+      "section": "§1.2.5, §1.2.7",
+      "execution_status": "unsupported",
+      "scope": "Nontrivial fitted preprocessing and replay not implemented",
+      "gate": "wire-only",
+      "case_ids": [
+        "training-preprocessing-wire-valid"
+      ]
+    },
+    {
+      "id": "algorithms",
+      "document": "training-protocol-appendix.md",
+      "section": "§5",
+      "execution_status": "partial",
+      "scope": "Only xgboost/xgboost_reg execute; RF/logistic catalogue claims are unmet",
+      "gate": "wire-only",
+      "case_ids": [
+        "training-reserved-random-forest"
+      ]
+    },
+    {
+      "id": "timeseries",
+      "document": "training-protocol.md",
+      "section": "§1.2.4; appendix §3",
+      "execution_status": "unsupported",
+      "scope": "Three-query entity pivot is unavailable",
+      "gate": "coverage",
+      "case_ids": []
+    },
+    {
+      "id": "tuning",
+      "document": "training-protocol-appendix.md",
+      "section": "§6.7",
+      "execution_status": "reserved",
+      "scope": "AUTO warning plus MANUAL fallback is permitted, not an AUTO search implementation",
+      "gate": "coverage",
+      "case_ids": []
+    },
+    {
+      "id": "sampling",
+      "document": "training-protocol.md",
+      "section": "§1.2.8",
+      "execution_status": "partial",
+      "scope": "SQL-materialized quotas only; not arbitrary sampling SQL or SMOTE",
+      "gate": "coverage",
+      "case_ids": []
+    },
+    {
+      "id": "training-events",
+      "document": "training-protocol.md",
+      "section": "§2.0–2.7",
+      "execution_status": "partial",
+      "scope": "Schema/trace oracle covers six events; durable terminal delivery not guaranteed",
+      "gate": "events",
+      "case_ids": []
+    },
+    {
+      "id": "inference-events",
+      "document": "inference-protocol.md",
+      "section": "§5",
+      "execution_status": "partial",
+      "scope": "Schema/trace oracle covers six events; durable terminal delivery not guaranteed",
+      "gate": "events",
+      "case_ids": []
+    },
+    {
+      "id": "terminal",
+      "document": "training-protocol.md",
+      "section": "§2.0; inference §5.0",
+      "execution_status": "partial",
+      "scope": "Redis atomic arbitration; crash-safe durable outcome ledger is still missing",
+      "gate": "trace",
+      "case_ids": []
+    },
+    {
+      "id": "progress",
+      "document": "inference-protocol.md",
+      "section": "§5.2; training §2.3",
+      "execution_status": "partial",
+      "scope": "Counters/first-round/monotonicity tested; full loss-free cadence not guaranteed",
+      "gate": "trace",
+      "case_ids": []
+    },
+    {
+      "id": "projection",
+      "document": "training-protocol.md",
+      "section": "§2.5.7",
+      "execution_status": "supported",
+      "scope": "Exact storage and model_artifacts projection, no backend inference/trimming",
+      "gate": "projection",
+      "case_ids": []
+    },
+    {
+      "id": "result-columns",
+      "document": "inference-protocol.md",
+      "section": "§4.1–4.3",
+      "execution_status": "supported",
+      "scope": "Binary/multiclass/regression result columns for supported XGBoost; no clustering execution claim",
+      "gate": "rows",
+      "case_ids": []
+    },
+    {
+      "id": "result-filter",
+      "document": "inference-protocol.md",
+      "section": "§4.4",
+      "execution_status": "supported",
+      "scope": "Original-label include/exclude including zero output",
+      "gate": "result-filter",
+      "case_ids": [
+        "inference-filter-label",
+        "inference-valid-filter"
+      ]
+    },
+    {
+      "id": "cancel",
+      "document": "training-protocol.md",
+      "section": "§4; inference §7",
+      "execution_status": "supported",
+      "scope": "EXISTS semantics and terminal exclusion; real lifecycle gate remains required",
+      "gate": "redis",
+      "case_ids": []
+    },
+    {
+      "id": "errors",
+      "document": "inference-protocol.md",
+      "section": "§3.6, §5.5",
+      "execution_status": "partial",
+      "scope": "Known errors and safe summaries; per-runtime source/format coverage incomplete",
+      "gate": "events",
+      "case_ids": []
+    },
+    {
+      "id": "security",
+      "document": "protocol-conventions.md",
+      "section": "§6",
+      "execution_status": "partial",
+      "scope": "Credential-redaction fixtures; ACL/MAXLEN on backend producer remain backend responsibility",
+      "gate": "security",
+      "case_ids": []
+    },
+    {
+      "id": "shap",
+      "document": "protocol-conventions.md",
+      "section": "§8",
+      "execution_status": "extension",
+      "scope": "TreeSHAP is an optional extension, not full base-protocol compatibility",
+      "gate": "coverage",
+      "case_ids": []
+    }
+  ]
+}

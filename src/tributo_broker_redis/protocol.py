@@ -89,6 +89,9 @@ class DriverInput(_StrictModel):
     )
     max_event_bytes: int
     max_stream_length: int
+    received_at_ms: int | None = Field(default=None, ge=0)
+    deadline_at_ms: int | None = Field(default=None, ge=0)
+    cancel_key: str | None = None
 
     @model_validator(mode="after")
     def _one_redis_connection(self) -> DriverInput:

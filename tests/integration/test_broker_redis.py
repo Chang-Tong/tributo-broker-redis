@@ -179,7 +179,16 @@ def _admit(
     assert pending["pending"] == 0
     events = _events(client, config, operation_type, operation_id)
     assert events and events[-1]["event_type"] in {"ACCEPTED", "CANCELLED", "FAILED"}
-    assert events[-1]["run_id"] == f"run-{operation_id}"
+    queued_cancel = (
+        events[-1]["event_type"] == "CANCELLED"
+        and events[-1]["submission_id"] is None
+        and events[-1]["phase"] == "QUEUED"
+    )
+    # Cancellation precedes payload parsing, so its fallback run identity comes
+    # from the outer envelope even when the payload contains another run_id.
+    assert events[-1]["run_id"] == (
+        operation_id if queued_cancel else f"run-{operation_id}"
+    )
     return events[-1]
 
 
@@ -214,30 +223,26 @@ def _training_spec(
     spec: dict[str, Any] = {
         "algorithm": "xgboost",
         "config": {
-            "data": {
-                "type": "csv",
-                "format": "csv",
-                "path": path or os.environ["BROKER_TRAIN_FIXTURE"],
-                "label_col": "label",
-                "feature_columns": ["x1", "x2"],
+            "ingestion": {
+                "source": {
+                    "type": "csv",
+                    "path": path or os.environ["BROKER_TRAIN_FIXTURE"],
+                },
+                "engine": "ray",
             },
-            "model": {
-                "objective": "binary:logistic",
-                "max_depth": 2,
-                "eta": 0.3,
-            },
+            "feature_names": ["x1", "x2"],
+            "label_name": "label",
+            "worker_count": num_workers,
+            "model": {"objective": "binary:logistic", "max_depth": 2, "eta": 0.3},
             "training": {
                 "num_rounds": rounds,
-                "val_size": 0.0,
-                "test_size": 0.0,
+                "train_ratio": 1.0,
+                "validation_ratio": 0.0,
+                "test_ratio": 0.0,
                 "seed": 7,
             },
-            "ray": {
-                "num_workers": num_workers,
-                "storage_path": f"/tmp/ray_results/{operation_id}/ray",
-                "max_failures": 0,
-            },
-            "output": {"bundle_uri": f"/tmp/ray_results/{operation_id}/bundles"},
+            "storage_path": f"/tmp/ray_results/{operation_id}/ray",
+            "bundle_uri": f"/tmp/ray_results/{operation_id}/bundles",
         },
     }
     if credential_ref is not None:
@@ -329,7 +334,7 @@ def test_four_real_healthy_paths_and_event_result_contracts(
         )
         assert terminal["event_type"] == "COMPLETED", json.dumps(events, sort_keys=True)
         assert terminal["submission_id"] == accepted["submission_id"]
-        assert terminal["payload"]["result"]["bundle_status"] == "succeeded"
+        assert terminal["payload"]["result"]["execution"]["status"] == "succeeded"
         job_client = JobSubmissionClient(provider_config.execution.ray_dashboard_url)
         logs = job_client.get_job_logs(accepted["submission_id"])
         assert {"PHASE", "LOG", "METRICS", "COMPLETED"}.issubset(

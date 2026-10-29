@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tributo.dev/contracts/aimodel-v2/training-request.schema.json",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$"
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "extensions": {},
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "algorithm": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "enum": [
+            "CLASSIFICATION",
+            "REGRESSION",
+            "CLUSTERING",
+            "TIMESERIES"
+          ]
+        },
+        "algorithm_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hyper_params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "category",
+        "algorithm_key",
+        "hyper_params"
+      ],
+      "additionalProperties": true
+    },
+    "datasource": {
+      "$ref": "common.schema.json#/$defs/datasource"
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/table"
+      },
+      "minItems": 1
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/relation"
+      },
+      "minItems": 0
+    },
+    "data_query": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "DIRECT_QUERY",
+            "TIMESERIES_PIVOT"
+          ]
+        },
+        "entity_key": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/column"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/query"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entity_sampling_query": {
+          "$ref": "common.schema.json#/$defs/query"
+        },
+        "feature_query": {
+          "$ref": "common.schema.json#/$defs/query"
+        },
+        "target_query": {
+          "$ref": "common.schema.json#/$defs/query"
+        },
+        "timeseries_pivot": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "DIRECT_QUERY"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "$ref": "common.schema.json#/$defs/query"
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "entity_key",
+              "entity_sampling_query",
+              "feature_query",
+              "target_query",
+              "timeseries_pivot"
+            ],
+            "properties": {
+              "entity_key": {
+                "$ref": "common.schema.json#/$defs/column"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/feature"
+      },
+      "minItems": 1
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "origin": {
+              "$ref": "common.schema.json#/$defs/origin"
+            },
+            "result_column": {
+              "type": "string",
+              "minLength": 1
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "task_type": {
+              "enum": [
+                "BINARY_CLASSIFICATION",
+                "MULTICLASS_CLASSIFICATION",
+                "REGRESSION",
+                "CLUSTERING",
+                "TIMESERIES_FORECAST"
+              ]
+            },
+            "label_mapping": {
+              "$ref": "common.schema.json#/$defs/label-map"
+            },
+            "positive_label_value": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "origin",
+            "result_column",
+            "display_name",
+            "task_type"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data_split": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "enum": [
+            "RANDOM",
+            "TIME_ORDERED"
+          ]
+        },
+        "train_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "validation_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "test_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "random_seed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stratify": {
+          "type": "boolean"
+        },
+        "cross_validation": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "k_folds": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "shuffle": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "data_sampling": {
+      "type": "object"
+    },
+    "feature_engineering": {
+      "type": "object"
+    },
+    "tuning": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "MANUAL",
+            "AUTO"
+          ]
+        },
+        "auto_config": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": true
+    },
+    "resource_limits": {
+      "type": "object",
+      "properties": {
+        "max_epochs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "early_stopping_patience": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_training_time_seconds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "evaluation": {
+      "type": "object"
+    },
+    "storage_context": {
+      "$ref": "common.schema.json#/$defs/storage"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "tenant_id",
+    "job_id",
+    "model_id",
+    "version_id",
+    "algorithm",
+    "datasource",
+    "tables",
+    "data_query",
+    "features",
+    "storage_context"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "algorithm": {
+            "properties": {
+              "category": {
+                "const": "CLUSTERING"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "$ref": "common.schema.json#/$defs/origin"
+              },
+              "result_column": {
+                "type": "string",
+                "minLength": 1
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "task_type": {
+                "enum": [
+                  "BINARY_CLASSIFICATION",
+                  "MULTICLASS_CLASSIFICATION",
+                  "REGRESSION",
+                  "CLUSTERING",
+                  "TIMESERIES_FORECAST"
+                ]
+              },
+              "label_mapping": {
+                "$ref": "common.schema.json#/$defs/label-map"
+              },
+              "positive_label_value": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "origin",
+              "result_column",
+              "display_name",
+              "task_type"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 [project]
 name = "tributo-broker-redis"
-version = "0.1.0"
+version = "0.3.0"
 description = "Redis Streams provider for Tributo Broker API v1"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -20,10 +20,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+contracts = ["jsonschema>=4.23,<5"]
+xgboost = [
+    "tributo[model-export]>=1.0,<2.0",
+    "tributo-algorithms-boosting>=0.1,<1",
+]
+aimodel-v2 = [
+    "tributo[model-export]>=1.0,<2.0",
+    "boto3>=1.42.91",
+    "clickhouse-connect>=1.5,<1.6",
+    "ray-clickhouse>=1.0,<2",
+    "tributo-algorithms-boosting>=0.1,<1",
+]
 dev = [
-    "mypy>=1.0",
+    "mypy>=1.14",
     "pytest>=8.0",
     "pytest-timeout>=2.3",
+    "jsonschema>=4.23,<5",
+    "types-jsonschema>=4.23",
     "ruff>=0.6,<1.0",
 ]
 
@@ -32,6 +46,7 @@ tributo-redis = "tributo_broker_redis.plugin:RedisBrokerPlugin"
 
 [project.scripts]
 tributo-broker-redis = "tributo_broker_redis.cli:main"
+tributo-broker-contract = "tributo_broker_redis.contracts.aimodel_v2.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -52,7 +67,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "tests/**/*.py" = ["B011"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit", "tests/integration"]
+testpaths = ["tests/unit", "tests/contracts", "tests/aimodel_v2", "tests/integration"]
 addopts = "-ra"
 markers = [
     "integration: requires a real Redis and/or Docker Ray environment",

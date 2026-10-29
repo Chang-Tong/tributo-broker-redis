@@ -145,6 +145,7 @@ class RedisTransportConfig(RedisConnectionConfig):
     claim_idle_ms: int = Field(default=60000, ge=0)
     claim_count: int = Field(default=10, ge=1, le=1000)
     max_payload_bytes: int = Field(default=1024 * 1024, ge=1)
+    max_driver_input_bytes: int = Field(default=256 * 1024, ge=1)
     max_event_bytes: int = Field(default=1024 * 1024, ge=1)
     max_stream_length: int = Field(default=1000, ge=1)
 
@@ -248,8 +249,15 @@ class ChannelSet(_StrictModel):
 
 
 class ProtocolProfileConfig(_StrictModel):
-    profile: Literal["tributo-generic-v1"] = "tributo-generic-v1"
-    protocol_version: Literal["1.0"] = "1.0"
+    profile: Literal["tributo-generic-v1", "aimodel-v2"] = "tributo-generic-v1"
+    protocol_version: Literal["1.0", "2.0"] = "1.0"
+
+    @model_validator(mode="after")
+    def _matching_version(self) -> ProtocolProfileConfig:
+        expected = "2.0" if self.profile == "aimodel-v2" else "1.0"
+        if self.protocol_version != expected:
+            raise ValueError(f"{self.profile} requires protocol_version={expected}")
+        return self
 
 
 class OperationExecutionConfig(_StrictModel):
@@ -405,6 +413,28 @@ class RedisBrokerConfig(_StrictModel):
     protocol: ProtocolProfileConfig = Field(default_factory=ProtocolProfileConfig)
     operations: OperationSet = Field(default_factory=OperationSet)
     execution: ExecutionConfig
+
+    @model_validator(mode="after")
+    def _profile_channels(self) -> RedisBrokerConfig:
+        if self.protocol.profile == "aimodel-v2":
+            identities: tuple[tuple[OperationType, str], ...] = (
+                ("training", "job_id"),
+                ("batch_inference", "execution_id"),
+            )
+            for operation, identity in identities:
+                channel = self.channels.for_operation(operation)
+                if channel.outer_identity_field != identity:
+                    raise ValueError(
+                        f"aimodel-v2 {operation} requires "
+                        f"outer_identity_field={identity}"
+                    )
+                if self.operations.for_operation(operation).execution_profiles != (
+                    "distributed",
+                ):
+                    raise ValueError(
+                        f"aimodel-v2 {operation} supports only distributed execution"
+                    )
+        return self
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> RedisBrokerConfig:

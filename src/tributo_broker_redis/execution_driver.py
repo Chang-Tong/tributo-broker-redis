@@ -7,11 +7,19 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+from tributo_broker_redis.driver_transport import read_driver_input
 from tributo_broker_redis.protocol import DriverInput
 from tributo_broker_redis.redis_client import create_redis_client
 from tributo_broker_redis.reporter import RedisEventReporter
+from tributo_broker_redis.training import (
+    GenericTrainingConfig,
+    execute_training,
+    serialize_result,
+)
 
 _DRIVER_ENV = "TRIBUTO_REDIS_DRIVER_INPUT_B64"
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -27,9 +35,7 @@ class _TerminalEventPublicationError(Exception):
 
 
 def _load_driver_input() -> tuple[DriverInput, str]:
-    raw = os.environ.get(_DRIVER_ENV)
-    if raw is None:
-        raise ValueError(f"{_DRIVER_ENV} is required")
+    raw = read_driver_input(os.environ)
     try:
         decoded = base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
     except Exception:
@@ -126,9 +132,21 @@ def _publish_nonterminal(
                 )
 
 
-def _run_training(value: DriverInput, reporter: RedisEventReporter) -> int:
-    from tributo.training.xgboost_trainer import run_training_result_with_config
+class _TrainingEvents:
+    def __init__(self, reporter: RedisEventReporter) -> None:
+        self.reporter = reporter
 
+    def phase(self, name: str) -> None:
+        _publish_nonterminal(self.reporter, "PHASE", {"phase": name}, phase=name)
+
+    def metrics(self, item: Mapping[str, Any]) -> None:
+        _publish_nonterminal(self.reporter, "METRICS", dict(item), phase="EXECUTING")
+
+
+def _run_training(value: DriverInput, reporter: RedisEventReporter) -> int:
+    config = GenericTrainingConfig.model_validate(
+        value.operation_payload["training_config"]
+    )
     _publish_nonterminal(reporter, "PHASE", {"phase": "PREPARING"}, phase="PREPARING")
     _publish_nonterminal(
         reporter,
@@ -136,25 +154,24 @@ def _run_training(value: DriverInput, reporter: RedisEventReporter) -> int:
         {"level": "INFO", "message": "Training driver started"},
         phase="PREPARING",
     )
-    _publish_nonterminal(reporter, "PHASE", {"phase": "EXECUTING"}, phase="EXECUTING")
-    result = run_training_result_with_config(
-        dict(value.operation_payload["training_config"])
+    result = execute_training(
+        config, run_id=value.run_id, reporter=_TrainingEvents(reporter)
     )
+    if result.execution.status != "succeeded":
+        reporter.failed("EXECUTION_FAILED", "AlgorithmExecutionResult", "EXECUTING")
+        return 1
     try:
-        serialized_result = result.model_dump(mode="json")
+        serialized_result = serialize_result(result)
+        bundle_uri = result.execution.outputs["bundle_uri"]
+        if not isinstance(bundle_uri, str) or not bundle_uri:
+            raise ValueError("successful training requires a Bundle URI")
     except Exception as exc:
         raise _TerminalEventPublicationError from exc
     _publish_nonterminal(
         reporter,
         "METRICS",
-        {"progress": 1.0, "metrics": serialized_result.get("metrics", {})},
+        {"progress": 1.0, "metrics": serialized_result["execution"].get("metrics", {})},
         phase="EXECUTING",
-    )
-    _publish_nonterminal(
-        reporter,
-        "PHASE",
-        {"phase": "MATERIALIZING"},
-        phase="MATERIALIZING",
     )
     _publish_completed(
         reporter,
@@ -162,8 +179,9 @@ def _run_training(value: DriverInput, reporter: RedisEventReporter) -> int:
             "result": serialized_result,
             "result_reference": {
                 "kind": "bundle",
-                "uri": result.bundle_uri,
-                "execution_id": result.execution_id,
+                "uri": bundle_uri,
+                "run_id": result.run_id,
+                "plan_id": result.plan_id,
             },
         },
     )

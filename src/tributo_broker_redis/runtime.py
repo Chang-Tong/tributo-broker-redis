@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +32,7 @@ from tributo_broker_redis.config import (
     normalize_config,
 )
 from tributo_broker_redis.consumer import RedisTaskConsumer
+from tributo_broker_redis.driver_transport import driver_transport
 from tributo_broker_redis.operations import (
     MappingFailure,
     PreparedOperation,
@@ -47,9 +49,19 @@ from tributo_broker_redis.reporter import RedisEventReporter
 
 logger = logging.getLogger(__name__)
 _DRIVER_ENV = "TRIBUTO_REDIS_DRIVER_INPUT_B64"
-_MAX_DRIVER_INPUT_BYTES = 64 * 1024
 _DEFAULT_DRIVER_ENTRYPOINT = "python -m tributo_broker_redis.execution_driver"
-_ACTIVE_RAY_STATUSES = frozenset({"PENDING", "RUNNING"})
+_RECOVERABLE_RAY_STATUSES = frozenset(
+    {"PENDING", "RUNNING", "FAILED", "STOPPED", "SUCCEEDED"}
+)
+_PENDING_RECOVERY_INTERVAL_SECONDS = 1.0
+
+
+def _metadata_milliseconds(metadata: Mapping[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    try:
+        return int(value) if value is not None and int(value) >= 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _list_ray_jobs(dashboard_url: str) -> Iterable[Any]:
@@ -88,6 +100,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             prepare_operation
         ),
         driver_entrypoint: str = _DEFAULT_DRIVER_ENTRYPOINT,
+        recovery_driver_entrypoints: tuple[str, ...] = (),
         reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
         job_lister: Callable[[str], Iterable[Any]] = _list_ray_jobs,
     ) -> None:
@@ -98,6 +111,10 @@ class RedisBrokerRuntime(BrokerRuntime):
         self._request_parser = request_parser
         self._operation_preparer = operation_preparer
         self._driver_entrypoint = driver_entrypoint
+        self._recovery_driver_entrypoints = {
+            driver_entrypoint,
+            *recovery_driver_entrypoints,
+        }
         self._reporter_factory = reporter_factory
         self._job_lister = job_lister
         validate_execution_environment(config)
@@ -122,6 +139,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             reporter_factory=reporter_factory,
         )
         self._next_channel = 0
+        self._next_pending_recovery = 0.0
         self._closed = False
         self._started = False
         if start_cancel_watcher:
@@ -139,11 +157,33 @@ class RedisBrokerRuntime(BrokerRuntime):
     def start(self) -> None:
         if self._started:
             return
+        logger.info(
+            "Starting Redis broker consumer: ray_dashboard=%s operations=%s",
+            self.config.execution.ray_dashboard_url,
+            ",".join(self._consumers),
+        )
         self._recover_active_submissions()
-        for consumer in self._consumers.values():
-            consumer.recover_pending()
+        self._recover_pending()
         self._cancel_watcher.start()
         self._started = True
+        logger.info("Redis broker consumer started")
+
+    def _recover_pending(self) -> None:
+        """Advance one native XAUTOCLAIM page per channel at a bounded cadence."""
+        now = time.monotonic()
+        if now < self._next_pending_recovery:
+            return
+        self._next_pending_recovery = now + _PENDING_RECOVERY_INTERVAL_SECONDS
+        for consumer in self._consumers.values():
+            try:
+                consumer.recover_pending()
+            except Exception as exc:
+                logger.warning(
+                    "Pending delivery recovery failed; will retry: "
+                    "operation_type=%s error_type=%s",
+                    consumer.operation_type,
+                    type(exc).__name__,
+                )
 
     def _recover_active_submissions(self) -> None:
         """Rebuild cancellation/watchdog state from credential-free Ray metadata."""
@@ -151,7 +191,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         for job in jobs:
             raw_status = getattr(job, "status", "")
             status = str(getattr(raw_status, "value", raw_status)).upper()
-            if status not in _ACTIVE_RAY_STATUSES:
+            if status not in _RECOVERABLE_RAY_STATUSES:
                 continue
             metadata = getattr(job, "metadata", None)
             if not isinstance(metadata, Mapping):
@@ -178,7 +218,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 not all(isinstance(value, str) and value for value in required)
                 or operation_type not in {"training", "batch_inference"}
                 or execution_profile not in {"single_worker", "distributed"}
-                or driver_entrypoint != self._driver_entrypoint
+                or driver_entrypoint not in self._recovery_driver_entrypoints
             ):
                 continue
             channel = self.config.channels.for_operation(
@@ -207,6 +247,12 @@ class RedisBrokerRuntime(BrokerRuntime):
                     execution_profile=cast(ExecutionProfile, execution_profile),
                     run_id=cast(str, run_id),
                     channel=channel,
+                    received_at_ms=_metadata_milliseconds(
+                        metadata, "tributo.received_at_ms"
+                    ),
+                    deadline_at_ms=_metadata_milliseconds(
+                        metadata, "tributo.deadline_at_ms"
+                    ),
                     submission=RayJobSubmission(
                         run_id=cast(str, run_id),
                         attempt_id=cast(str, attempt_id),
@@ -215,6 +261,21 @@ class RedisBrokerRuntime(BrokerRuntime):
                         request_digest=request_digest,
                     ),
                 )
+            )
+            recovered = self.active_submissions.get(cast(str, operation_id))
+            if recovered is not None and terminal_event_published(
+                self._redis, recovered
+            ):
+                self.active_submissions.remove(recovered.operation_id)
+                continue
+            logger.info(
+                "Recovered active Ray job: operation_id=%s operation_type=%s "
+                "submission_id=%s ray_job_id=%s status=%s",
+                operation_id,
+                operation_type,
+                submission_id,
+                ray_job_id or "<unknown>",
+                status,
             )
 
     def _resume_existing_submission(
@@ -246,9 +307,23 @@ class RedisBrokerRuntime(BrokerRuntime):
                 ),
             )
         if terminal_event_published(self._redis, existing):
+            logger.info(
+                "Recovered operation is already terminal: operation_id=%s "
+                "submission_id=%s ray_job_id=%s",
+                request.operation_id,
+                existing.submission.submission_id,
+                existing.submission.ray_job_id or "<unknown>",
+            )
             self.active_submissions.remove(request.operation_id)
             return TaskOutcome(TaskDisposition.ACK)
         try:
+            logger.info(
+                "Reconfirming recovered Ray admission: operation_id=%s "
+                "submission_id=%s ray_job_id=%s",
+                request.operation_id,
+                existing.submission.submission_id,
+                existing.submission.ray_job_id or "<unknown>",
+            )
             self._reporter(
                 operation_id=request.operation_id,
                 operation_type=operation_type,
@@ -256,6 +331,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 run_id=run_id,
                 attempt_id=request.attempt_id,
                 submission=existing.submission,
+                received_at_ms=existing.received_at_ms,
             ).publish(
                 "ACCEPTED",
                 {
@@ -289,6 +365,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         run_id: str,
         attempt_id: str,
         submission: RayJobSubmission | None = None,
+        received_at_ms: int | str | None = None,
     ) -> RedisEventReporter:
         channel = self.config.channels.for_operation(operation_type)
         return self._reporter_factory(
@@ -304,6 +381,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             outer_identity_field=channel.outer_identity_field,
             max_event_bytes=self.config.transport.max_event_bytes,
             max_stream_length=self.config.transport.max_stream_length,
+            received_at_ms=int(received_at_ms) if received_at_ms is not None else None,
         )
 
     def _invalid(
@@ -320,6 +398,15 @@ class RedisBrokerRuntime(BrokerRuntime):
         operation_id = message.metadata.get("outer_operation_id") or (
             f"invalid-{message.delivery_token}"
         )
+        logger.warning(
+            "Rejecting invalid Redis task: operation_type=%s operation_id=%s "
+            "delivery=%s code=%s message=%s",
+            operation_type,
+            operation_id,
+            message.delivery_token,
+            code,
+            sanitized_message,
+        )
         try:
             self._reporter(
                 operation_id=operation_id,
@@ -327,6 +414,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 execution_profile=execution_profile,
                 run_id=run_id or operation_id,
                 attempt_id=attempt_id,
+                received_at_ms=message.metadata.get("received_at_ms"),
             ).publish(
                 "FAILED",
                 {
@@ -351,12 +439,54 @@ class RedisBrokerRuntime(BrokerRuntime):
     def handle(self, message: Message) -> TaskOutcome:
         operation_type = cast(OperationType, message.metadata["operation_type"])
         outer_operation_id = message.metadata.get("outer_operation_id", "")
+        logger.debug(
+            "Handling Redis delivery: operation_type=%s operation_id=%s delivery=%s",
+            operation_type,
+            outer_operation_id or "<missing>",
+            message.delivery_token,
+        )
         if not outer_operation_id:
             return self._invalid(
                 message,
                 operation_type=operation_type,
                 code="INVALID_OPERATION_ID",
                 sanitized_message="outer operation_id is required",
+            )
+        # Cancellation is an envelope-level control. It must win over malformed
+        # JSON and operation schema validation, using the recoverable outer ID.
+        channel = self.config.channels.for_operation(operation_type)
+        try:
+            if bool(self._redis.exists(channel.cancel_key(outer_operation_id))):
+                existing = self.active_submissions.get(outer_operation_id)
+                if existing is None:
+                    self._reporter(
+                        operation_id=outer_operation_id,
+                        operation_type=operation_type,
+                        execution_profile="single_worker",
+                        run_id=outer_operation_id,
+                        attempt_id="attempt-1",
+                        received_at_ms=message.metadata.get("received_at_ms"),
+                    ).publish(
+                        "CANCELLED",
+                        {"reason": "cancelled before admission"},
+                        phase="QUEUED",
+                    )
+                # An active Ray job must first be stopped by its lifecycle watcher.
+                return TaskOutcome(TaskDisposition.ACK)
+        except Exception:
+            return TaskOutcome(
+                TaskDisposition.RETRY,
+                BrokerError(
+                    code="CANCEL_CHECK_UNAVAILABLE",
+                    sanitized_message="queued cancellation check unavailable",
+                ),
+            )
+        if message.metadata.get("encoding_error"):
+            return self._invalid(
+                message,
+                operation_type=operation_type,
+                code="INVALID_PAYLOAD",
+                sanitized_message="payload is not valid UTF-8",
             )
         if message.metadata.get("envelope_error"):
             return self._invalid(
@@ -425,9 +555,16 @@ class RedisBrokerRuntime(BrokerRuntime):
             execution_profile=request.execution_profile,
             run_id=run_id,
             attempt_id=request.attempt_id,
+            received_at_ms=message.metadata.get("received_at_ms"),
         )
         try:
             if bool(self._redis.exists(channel.cancel_key(request.operation_id))):
+                logger.info(
+                    "Operation cancelled before Ray admission: operation_id=%s "
+                    "operation_type=%s",
+                    request.operation_id,
+                    operation_type,
+                )
                 reporter.publish(
                     "CANCELLED",
                     {"reason": "cancelled before admission"},
@@ -435,6 +572,13 @@ class RedisBrokerRuntime(BrokerRuntime):
                 )
                 return TaskOutcome(TaskDisposition.ACK)
         except Exception:
+            logger.warning(
+                "Could not check cancellation marker: operation_id=%s "
+                "operation_type=%s",
+                request.operation_id,
+                operation_type,
+                exc_info=True,
+            )
             return TaskOutcome(
                 TaskDisposition.RETRY,
                 BrokerError(
@@ -444,6 +588,14 @@ class RedisBrokerRuntime(BrokerRuntime):
             )
 
         namespace = f"redis-{operation_type.replace('_', '-')}"
+        received_at_ms = int(
+            message.metadata.get("received_at_ms") or time.time() * 1000
+        )
+        deadline_at_ms = (
+            received_at_ms + int(prepared.timeout_seconds * 1000)
+            if prepared.timeout_seconds is not None
+            else None
+        )
         driver_input = DriverInput(
             operation_id=request.operation_id,
             operation_type=operation_type,
@@ -457,11 +609,25 @@ class RedisBrokerRuntime(BrokerRuntime):
             outer_identity_field=channel.outer_identity_field,
             max_event_bytes=self.config.transport.max_event_bytes,
             max_stream_length=self.config.transport.max_stream_length,
+            received_at_ms=received_at_ms,
+            deadline_at_ms=deadline_at_ms,
+            cancel_key=channel.cancel_key(request.operation_id),
         )
         encoded_driver_input = base64.urlsafe_b64encode(
             driver_input.model_dump_json().encode("utf-8")
         ).decode("ascii")
-        if len(encoded_driver_input.encode("ascii")) > _MAX_DRIVER_INPUT_BYTES:
+        if (
+            len(encoded_driver_input.encode("ascii"))
+            > self.config.transport.max_driver_input_bytes
+        ):
+            logger.warning(
+                "Ray driver input exceeds configured limit: operation_id=%s "
+                "operation_type=%s bytes=%d limit=%d",
+                request.operation_id,
+                operation_type,
+                len(encoded_driver_input.encode("ascii")),
+                self.config.transport.max_driver_input_bytes,
+            )
             return self._invalid(
                 message,
                 operation_type=operation_type,
@@ -470,37 +636,64 @@ class RedisBrokerRuntime(BrokerRuntime):
             )
 
         env_vars = dict(self.config.execution.env_vars)
-        env_vars[_DRIVER_ENV] = encoded_driver_input
         try:
-            submission = self._submitter(
-                self._driver_entrypoint,
-                operation_namespace=namespace,
-                run_id=run_id,
-                attempt_id=request.attempt_id,
-                dashboard_url=self.config.execution.ray_dashboard_url,
-                env_vars=env_vars,
-                project_root=Path(self.config.execution.project_root)
-                .expanduser()
-                .resolve(),
-                extra_py_modules=[
-                    module
-                    if "://" in module
-                    else str(Path(module).expanduser().resolve())
-                    for module in self.config.execution.extra_py_modules
-                ],
-                runtime_pip_packages=list(self.config.execution.runtime_pip_packages),
-                metadata={
-                    "tributo.operation_id": request.operation_id,
-                    "tributo.operation_type": operation_type,
-                    "tributo.execution_profile": request.execution_profile,
-                    "tributo.protocol_profile": request.protocol_profile,
-                    "tributo.run_id": run_id,
-                    "tributo.attempt_id": request.attempt_id,
-                    "tributo.driver_entrypoint": self._driver_entrypoint,
-                    "tributo.task_stream": channel.task_stream_key,
-                },
-                request_digest=request.request_digest,
-                entrypoint_num_cpus=self.config.execution.entrypoint_num_cpus,
+            logger.info(
+                "Submitting Ray job: operation_id=%s operation_type=%s "
+                "run_id=%s attempt_id=%s driver_input_bytes=%d",
+                request.operation_id,
+                operation_type,
+                run_id,
+                request.attempt_id,
+                len(encoded_driver_input.encode("ascii")),
+            )
+            modules = [
+                module if "://" in module else str(Path(module).expanduser().resolve())
+                for module in self.config.execution.extra_py_modules
+            ]
+            with driver_transport(encoded_driver_input, env_vars, modules) as (
+                env_vars,
+                modules,
+            ):
+                submission = self._submitter(
+                    self._driver_entrypoint,
+                    operation_namespace=namespace,
+                    run_id=run_id,
+                    attempt_id=request.attempt_id,
+                    dashboard_url=self.config.execution.ray_dashboard_url,
+                    env_vars=env_vars,
+                    project_root=Path(self.config.execution.project_root)
+                    .expanduser()
+                    .resolve(),
+                    extra_py_modules=modules,
+                    runtime_pip_packages=list(
+                        self.config.execution.runtime_pip_packages
+                    ),
+                    metadata={
+                        "tributo.operation_id": request.operation_id,
+                        "tributo.operation_type": operation_type,
+                        "tributo.execution_profile": request.execution_profile,
+                        "tributo.protocol_profile": self.config.protocol.profile,
+                        "tributo.run_id": run_id,
+                        "tributo.attempt_id": request.attempt_id,
+                        "tributo.driver_entrypoint": self._driver_entrypoint,
+                        "tributo.task_stream": channel.task_stream_key,
+                        "tributo.received_at_ms": str(received_at_ms),
+                        **(
+                            {"tributo.deadline_at_ms": str(deadline_at_ms)}
+                            if deadline_at_ms is not None
+                            else {}
+                        ),
+                    },
+                    request_digest=request.request_digest,
+                    entrypoint_num_cpus=self.config.execution.entrypoint_num_cpus,
+                )
+            logger.info(
+                "Ray job admitted: operation_id=%s operation_type=%s "
+                "submission_id=%s ray_job_id=%s",
+                request.operation_id,
+                operation_type,
+                submission.submission_id,
+                submission.ray_job_id or "<unknown>",
             )
             active = ActiveSubmission(
                 operation_id=request.operation_id,
@@ -509,6 +702,8 @@ class RedisBrokerRuntime(BrokerRuntime):
                 run_id=run_id,
                 channel=channel,
                 submission=submission,
+                received_at_ms=received_at_ms,
+                deadline_at_ms=deadline_at_ms,
             )
             self.active_submissions.put(active)
             self._reporter(
@@ -518,6 +713,7 @@ class RedisBrokerRuntime(BrokerRuntime):
                 run_id=run_id,
                 attempt_id=request.attempt_id,
                 submission=submission,
+                received_at_ms=received_at_ms,
             ).publish(
                 "ACCEPTED",
                 {
@@ -526,10 +722,20 @@ class RedisBrokerRuntime(BrokerRuntime):
                 },
                 phase="ADMITTED",
             )
+            logger.info(
+                "Admission event published: operation_id=%s submission_id=%s "
+                "ray_job_id=%s",
+                request.operation_id,
+                submission.submission_id,
+                submission.ray_job_id or "<unknown>",
+            )
         except Exception:
             logger.warning(
-                "Ray admission is not confirmed: operation_id=%s",
+                "Ray admission is not confirmed: operation_id=%s "
+                "operation_type=%s delivery=%s",
                 request.operation_id,
+                operation_type,
+                message.delivery_token,
                 exc_info=True,
             )
             return TaskOutcome(
@@ -544,6 +750,15 @@ class RedisBrokerRuntime(BrokerRuntime):
     def _apply_outcome(
         self, consumer: RedisTaskConsumer, message: Message, outcome: TaskOutcome
     ) -> None:
+        logger.debug(
+            "Applying Redis delivery outcome: operation_type=%s operation_id=%s "
+            "delivery=%s disposition=%s error_code=%s",
+            consumer.operation_type,
+            message.metadata.get("outer_operation_id") or "<missing>",
+            message.delivery_token,
+            outcome.disposition,
+            outcome.error.code if outcome.error else "<none>",
+        )
         if outcome.disposition == TaskDisposition.ACK:
             consumer.ack(message)
         elif outcome.disposition == TaskDisposition.RETRY:
@@ -552,6 +767,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             consumer.reject(message, outcome.error)
 
     def run_once(self, timeout_ms: int | None = None) -> bool:
+        self._recover_pending()
         operations: tuple[OperationType, ...] = ("training", "batch_inference")
         per_channel_timeout = (
             self.config.transport.block_ms
@@ -580,14 +796,23 @@ class RedisBrokerRuntime(BrokerRuntime):
         if self._closed:
             return
         self._closed = True
+        logger.info("Stopping Redis broker consumer")
         self._cancel_watcher.close()
         close = getattr(self._redis, "close", None)
         if callable(close):
             close()
+        logger.info("Redis broker consumer stopped")
 
 
 def create_runtime(config: Mapping[str, Any]) -> RedisBrokerRuntime:
-    return RedisBrokerRuntime(normalize_config(config))
+    parsed = normalize_config(config)
+    if parsed.protocol.profile == "aimodel-v2":
+        from tributo_broker_redis.profiles.aimodel_v2.broker import (
+            create_runtime as create_v2_runtime,
+        )
+
+        return create_v2_runtime(parsed)
+    return RedisBrokerRuntime(parsed)
 
 
 __all__ = [

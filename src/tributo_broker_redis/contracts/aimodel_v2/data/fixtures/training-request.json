@@ -1,0 +1,112 @@
+{
+  "protocol_version": "2.0",
+  "job_id": "train-contract-1",
+  "tenant_id": "tenant",
+  "model_id": "model",
+  "version_id": "v1",
+  "algorithm": {
+    "category": "CLASSIFICATION",
+    "algorithm_key": "xgboost",
+    "hyper_params": {
+      "n_estimators": 3,
+      "max_depth": 2
+    }
+  },
+  "datasource": {
+    "type": "CLICKHOUSE",
+    "host": "clickhouse",
+    "port": 8123,
+    "database_name": "analytics",
+    "username": "reader",
+    "credential_ref": "env:FIXTURE_DB_PASSWORD",
+    "properties": {}
+  },
+  "tables": [
+    {
+      "table_alias": "t0",
+      "database_name": "analytics",
+      "table_name": "samples",
+      "role": "PRIMARY"
+    }
+  ],
+  "relations": [],
+  "data_query": {
+    "mode": "DIRECT_QUERY",
+    "query": {
+      "sql": "SELECT t0.activity AS opaque_feature_A, t0.spend AS opaque_feature_B, t0.label AS opaque_target FROM analytics.samples t0 WHERE t0.month = {month:String}",
+      "params": {
+        "month": "202601"
+      }
+    }
+  },
+  "features": [
+    {
+      "feature_id": "f001",
+      "display_name": "活跃度",
+      "feature_role": "REGULAR",
+      "origin": {
+        "table_alias": "t0",
+        "column_name": "activity",
+        "column_type": "Float64"
+      },
+      "result_column": "opaque_feature_A"
+    },
+    {
+      "feature_id": "f002",
+      "display_name": "消费",
+      "feature_role": "REGULAR",
+      "origin": {
+        "table_alias": "t0",
+        "column_name": "spend",
+        "column_type": "Float64"
+      },
+      "result_column": "opaque_feature_B"
+    }
+  ],
+  "target": {
+    "display_name": "标签",
+    "origin": {
+      "table_alias": "t0",
+      "column_name": "label",
+      "column_type": "Int32"
+    },
+    "result_column": "opaque_target",
+    "task_type": "BINARY_CLASSIFICATION",
+    "label_mapping": {
+      "否": 0,
+      "是": 1
+    },
+    "positive_label_value": "是"
+  },
+  "data_split": {
+    "strategy": "RANDOM",
+    "train_ratio": 0.7,
+    "validation_ratio": 0.15,
+    "test_ratio": 0.15,
+    "stratify": false,
+    "cross_validation": {
+      "enabled": false
+    }
+  },
+  "feature_engineering": {},
+  "data_sampling": {},
+  "tuning": {
+    "mode": "MANUAL",
+    "auto_config": null
+  },
+  "resource_limits": {
+    "max_epochs": 3
+  },
+  "evaluation": {
+    "primary_metric": "auc",
+    "additional_metrics": [],
+    "artifacts": {}
+  },
+  "storage_context": {
+    "type": "nas",
+    "bucket": "/models",
+    "prefix": "tenant/model/v1/",
+    "properties": {}
+  },
+  "extensions": {}
+}

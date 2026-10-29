@@ -1,0 +1,119 @@
+name: Protocol contracts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      broker_repository:
+        type: string
+        default: ''
+      broker_ref:
+        type: string
+        default: ''
+      candidate_artifact:
+        description: App-produced evidence artifact from an earlier job in the calling run
+        type: string
+        default: ''
+      candidate_level:
+        type: string
+        default: portable
+      ray_dashboard_url:
+        type: string
+        default: ''
+      runner_labels_json:
+        description: JSON runner label string or list; runtime evidence needs live isolated Ray access
+        type: string
+        default: '"ubuntu-latest"'
+      spec_repository:
+        description: Optional repository holding the authoritative protocol documents
+        type: string
+        default: ''
+      spec_ref:
+        type: string
+        default: ''
+      spec_directory:
+        description: Directory containing the four locked Markdown documents
+        type: string
+        default: external/ai-model-design-docs/训练推理引擎任务描述协议/protocol-v2-2606
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ${{ fromJSON(inputs.runner_labels_json || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.broker_repository || github.repository }}
+          ref: ${{ inputs.broker_ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install only portable checker dependencies and the built package
+        run: |
+          python -m pip install 'jsonschema>=4.23,<5' 'pytest>=8'
+          python -m pip install --no-deps .
+      - name: Require evidence for component gates
+        env:
+          CANDIDATE_LEVEL: ${{ inputs.candidate_level || 'portable' }}
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
+        run: |
+          case "$CANDIDATE_LEVEL" in
+            portable)
+              if [ -n "$CANDIDATE_ARTIFACT" ]; then
+                echo '::error::Select backend or runtime to validate component evidence'
+                exit 1
+              fi ;;
+            backend|runtime)
+              if [ -z "$CANDIDATE_ARTIFACT" ]; then
+                echo '::error::Component protocol gates require candidate_artifact'
+                exit 1
+              fi ;;
+            *) echo '::error::Unknown protocol gate level'; exit 1 ;;
+          esac
+      - name: Portable schema, semantic oracle and CI tests (no Core/Ray/Redis)
+        run: python -m pytest tests/contracts/test_bundle.py tests/contracts/test_cli.py -q --junitxml=artifacts/portable.xml
+      - name: Export contracts and self-test the packaged fixtures
+        run: |
+          tributo-broker-contract self-test --junit artifacts/vectors.xml --report artifacts/vectors.json
+          tributo-broker-contract export --output artifacts/contract-bundle
+          tributo-broker-contract coverage > artifacts/coverage.json
+      - name: Require a specific authoritative protocol revision when checking drift
+        if: inputs.spec_repository != ''
+        env:
+          SPEC_REF: ${{ inputs.spec_ref }}
+        run: test -n "$SPEC_REF"
+      - name: Checkout authoritative protocol snapshot
+        if: inputs.spec_repository != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.spec_repository }}
+          ref: ${{ inputs.spec_ref }}
+          path: protocol-source
+      - name: Reject unreviewed protocol drift
+        if: inputs.spec_repository != ''
+        env:
+          SPEC_DIRECTORY: ${{ inputs.spec_directory }}
+        run: tributo-broker-contract verify-spec --root "protocol-source/$SPEC_DIRECTORY"
+      - name: Download app-produced evidence from this workflow run
+        if: inputs.candidate_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+      - name: Verify backend or live runtime evidence
+        if: inputs.candidate_artifact != ''
+        env:
+          CANDIDATE_LEVEL: ${{ inputs.candidate_level }}
+          RAY_URL: ${{ inputs.ray_dashboard_url }}
+        run: tributo-broker-contract candidate --directory candidate --level "$CANDIDATE_LEVEL" --ray-url "$RAY_URL" --report artifacts/candidate.json --junit artifacts/candidate.xml
+      - name: Preserve contract version and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-contracts-${{ inputs.candidate_level || 'portable' }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error

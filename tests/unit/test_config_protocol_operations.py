@@ -192,6 +192,7 @@ def test_runtime_rejects_unknown_outer_envelope_fields(
     config: RedisBrokerConfig,
 ) -> None:
     client = MagicMock()
+    client.exists.return_value = 0
     client.xreadgroup.return_value = [
         (
             config.channels.training.task_stream_key,
@@ -447,6 +448,8 @@ def test_plugin_declares_only_validated_namespaced_capabilities() -> None:
             "transport.redis.consumer-group",
             "transport.redis.sentinel",
             "transport.redis.credential-reference",
+            "protocol.tributo-generic-v1",
+            "protocol.aimodel-v2",
             "operation.training.single_worker",
             "operation.training.distributed",
             "operation.batch_inference.single_worker",
@@ -535,12 +538,12 @@ def test_four_operation_profiles_prepare_core_revalidatable_payloads(
     )
     prepared = prepare_operation(request)
     if operation_type == "training":
-        from tributo.training.xgboost_trainer import XGBoostTrainingConfig
+        from tributo_broker_redis.training import GenericTrainingConfig
 
-        config = XGBoostTrainingConfig.model_validate(
+        config = GenericTrainingConfig.model_validate(
             prepared.operation_payload["training_config"]
         )
-        assert config.ray.num_workers == (1 if profile == "single_worker" else 2)
+        assert config.worker_count == (1 if profile == "single_worker" else 2)
     else:
         from tributo.inference.contracts import InferenceRequest
 
@@ -686,7 +689,7 @@ def test_protocol_rejects_credentials_embedded_in_uri_values(uri: str) -> None:
             {"algorithm": "xgboost", "config": training_config(1)},
         )
     )
-    value["spec"]["config"]["data"]["path"] = uri
+    value["spec"]["config"]["ingestion"]["source"]["path"] = uri
 
     with pytest.raises(ProtocolFailure) as credential:
         parse_request(

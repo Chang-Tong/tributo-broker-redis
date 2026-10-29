@@ -1,0 +1,503 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tributo.dev/contracts/aimodel-v2/inference-event.schema.json",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$"
+    },
+    "event_type": {
+      "enum": [
+        "STARTED",
+        "LOG",
+        "PROGRESS",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED"
+      ]
+    },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "phase": {
+      "enum": [
+        "INIT",
+        "LOAD_MODEL",
+        "CONNECT_INPUT",
+        "READ_INPUT",
+        "PREPROCESS",
+        "PREDICT",
+        "POSTPROCESS",
+        "WRITE_RESULT",
+        "CLEANUP"
+      ]
+    },
+    "level": {
+      "enum": [
+        "debug",
+        "info",
+        "warning",
+        "error",
+        "success"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "error_code": {
+      "enum": [
+        "UNSUPPORTED_PROTOCOL_VERSION",
+        "INVALID_PAYLOAD",
+        "MODEL_ARTIFACT_NOT_FOUND",
+        "MODEL_ARTIFACT_CORRUPTED",
+        "MODEL_LOAD_FAILED",
+        "MODEL_FORMAT_UNSUPPORTED",
+        "MODEL_SCHEMA_MISMATCH",
+        "DATA_SOURCE_UNREACHABLE",
+        "INPUT_QUERY_FAILED",
+        "INPUT_COLUMN_MISSING",
+        "EMPTY_INPUT",
+        "PREDICTION_FAILED",
+        "RESULT_WRITE_FAILED",
+        "EXECUTION_TIMEOUT",
+        "UNKNOWN"
+      ]
+    },
+    "error_message": {
+      "type": "string"
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "stack_trace": {
+      "type": "string"
+    },
+    "processed_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "result_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "current_round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "total_rounds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "progress_percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric_name": {
+            "$ref": "common.schema.json#/$defs/metric-name"
+          },
+          "train": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "eval": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "metric_name"
+        ],
+        "additionalProperties": true
+      },
+      "minItems": 0
+    },
+    "has_best_model": {
+      "type": "boolean"
+    },
+    "stop_reason": {
+      "type": "string"
+    },
+    "training_result": {
+      "type": "object",
+      "properties": {
+        "algorithm_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_type": {
+          "enum": [
+            "BINARY_CLASSIFICATION",
+            "MULTICLASS_CLASSIFICATION",
+            "REGRESSION",
+            "CLUSTERING",
+            "TIMESERIES_FORECAST"
+          ]
+        },
+        "model_features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model_feature_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "model_feature_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "feature_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "transformation": {
+                "enum": [
+                  "PASSTHROUGH",
+                  "STANDARD_SCALING",
+                  "MINMAX_SCALING",
+                  "ROBUST_SCALING",
+                  "ONE_HOT",
+                  "LABEL_ENCODING",
+                  "TARGET_ENCODING",
+                  "MISSING_INDICATOR"
+                ]
+              }
+            },
+            "required": [
+              "model_feature_index",
+              "model_feature_name",
+              "feature_id",
+              "transformation"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 1
+        },
+        "evaluation": {
+          "type": "object",
+          "properties": {
+            "eval_type": {
+              "enum": [
+                "BINARY_CLASSIFICATION",
+                "MULTICLASS_CLASSIFICATION",
+                "REGRESSION",
+                "CLUSTERING",
+                "TIMESERIES_FORECAST"
+              ]
+            },
+            "sample_rows": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "metric_name": {
+                    "$ref": "common.schema.json#/$defs/metric-name"
+                  },
+                  "value": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "metric_name",
+                  "value"
+                ],
+                "additionalProperties": true
+              },
+              "minItems": 0
+            },
+            "details": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "eval_type",
+            "sample_rows",
+            "metrics",
+            "details"
+          ],
+          "additionalProperties": true
+        },
+        "feature_analysis": {
+          "type": "object"
+        },
+        "tuning_result": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "algorithm_key",
+        "task_type",
+        "model_features",
+        "evaluation",
+        "feature_analysis"
+      ],
+      "additionalProperties": true
+    },
+    "artifact_manifest": {
+      "type": "object",
+      "properties": {
+        "storage": {
+          "$ref": "common.schema.json#/$defs/storage"
+        },
+        "model_artifacts": {
+          "$ref": "common.schema.json#/$defs/artifacts"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "storage",
+        "model_artifacts",
+        "tenant_id",
+        "model_id",
+        "version_id",
+        "created_at"
+      ],
+      "additionalProperties": true
+    },
+    "result_summary": {
+      "type": "object",
+      "properties": {
+        "primary_metric": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "$ref": "common.schema.json#/$defs/metric-name"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sample_rows": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "train": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "validation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "test": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "total",
+            "train",
+            "validation",
+            "test"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "sample_rows"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "protocol_version",
+    "event_type",
+    "execution_id",
+    "timestamp"
+  ],
+  "additionalProperties": true,
+  "not": {
+    "required": [
+      "job_id"
+    ]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "LOG"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "level",
+          "message"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "FAILED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "phase",
+          "error_code",
+          "error_message",
+          "duration_seconds"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "CANCELLED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "phase",
+          "duration_seconds",
+          "processed_rows",
+          "result_rows",
+          "total_rows",
+          "percent",
+          "stop_reason"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "STARTED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "total_rows"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "PROGRESS"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "phase",
+          "processed_rows",
+          "result_rows",
+          "total_rows",
+          "percent"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "COMPLETED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "phase",
+          "processed_rows",
+          "result_rows",
+          "total_rows",
+          "percent",
+          "duration_seconds"
+        ],
+        "properties": {
+          "phase": {
+            "const": "CLEANUP"
+          },
+          "percent": {
+            "const": 100
+          }
+        }
+      }
+    }
+  ]
+}

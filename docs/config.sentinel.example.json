@@ -21,6 +21,7 @@
     "claim_idle_ms": 60000,
     "claim_count": 10,
     "max_payload_bytes": 1048576,
+    "max_driver_input_bytes": 262144,
     "max_event_bytes": 1048576,
     "max_stream_length": 1000
   },
@@ -61,7 +62,7 @@
     "project_root": "/opt/tributo-core",
     "extra_py_modules": [],
     "runtime_pip_packages": [
-      "/provider/tributo_broker_redis-0.1.0-py3-none-any.whl"
+      "/provider/tributo_broker_redis-0.3.0-py3-none-any.whl"
     ],
     "env_vars": {},
     "cancel_poll_interval_seconds": 0.5,

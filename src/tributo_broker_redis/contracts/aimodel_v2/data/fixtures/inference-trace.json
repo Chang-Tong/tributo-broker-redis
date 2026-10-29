@@ -1,0 +1,42 @@
+[
+  {
+    "stream_key": "knova:aimodel:inference:events:infer-contract-1",
+    "entry_id": "1-0",
+    "fields": {
+      "execution_id": "infer-contract-1",
+      "payload": "{\"protocol_version\": \"2.0\", \"execution_id\": \"infer-contract-1\", \"event_type\": \"STARTED\", \"timestamp\": 1781161200000, \"phase\": \"READ_INPUT\", \"total_rows\": 2}"
+    }
+  },
+  {
+    "stream_key": "knova:aimodel:inference:events:infer-contract-1",
+    "entry_id": "2-0",
+    "fields": {
+      "execution_id": "infer-contract-1",
+      "payload": "{\"protocol_version\": \"2.0\", \"execution_id\": \"infer-contract-1\", \"event_type\": \"PROGRESS\", \"timestamp\": 1781161200000, \"phase\": \"PREDICT\", \"processed_rows\": 1, \"result_rows\": 0, \"total_rows\": 2, \"percent\": 50}"
+    }
+  },
+  {
+    "stream_key": "knova:aimodel:inference:events:infer-contract-1",
+    "entry_id": "3-0",
+    "fields": {
+      "execution_id": "infer-contract-1",
+      "payload": "{\"protocol_version\": \"2.0\", \"execution_id\": \"infer-contract-1\", \"event_type\": \"LOG\", \"timestamp\": 1781161200000, \"phase\": \"PREDICT\", \"level\": \"error\", \"message\": \"nonfatal diagnostic\"}"
+    }
+  },
+  {
+    "stream_key": "knova:aimodel:inference:events:infer-contract-1",
+    "entry_id": "4-0",
+    "fields": {
+      "execution_id": "infer-contract-1",
+      "payload": "{\"protocol_version\": \"2.0\", \"execution_id\": \"infer-contract-1\", \"event_type\": \"PROGRESS\", \"timestamp\": 1781161200000, \"phase\": \"WRITE_RESULT\", \"processed_rows\": 2, \"result_rows\": 1, \"total_rows\": 2, \"percent\": 100}"
+    }
+  },
+  {
+    "stream_key": "knova:aimodel:inference:events:infer-contract-1",
+    "entry_id": "5-0",
+    "fields": {
+      "execution_id": "infer-contract-1",
+      "payload": "{\"protocol_version\": \"2.0\", \"execution_id\": \"infer-contract-1\", \"event_type\": \"COMPLETED\", \"timestamp\": 1781161200000, \"phase\": \"CLEANUP\", \"processed_rows\": 2, \"result_rows\": 1, \"total_rows\": 2, \"percent\": 100, \"duration_seconds\": 1}"
+    }
+  }
+]

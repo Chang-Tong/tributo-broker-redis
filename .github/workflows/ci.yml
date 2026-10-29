@@ -3,17 +3,36 @@ name: Provider CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      broker_repository:
+        type: string
+        default: ''
+      broker_ref:
+        type: string
+        default: ''
+      core_repository:
+        type: string
+        default: Chang-Tong/Tributo
+      core_ref:
+        description: Override with the Core PR commit to check provider compatibility
+        type: string
+        default: 1eaae848ef7f6acbd600c87771f91f9291f00b3e
 
 env:
-  # Pin the exact Core baseline used by the provider wheel and Redis/Ray matrix.
-  TRIBUTO_CORE_REPOSITORY: jiangxt2/Tributo
-  TRIBUTO_CORE_REF: 8a3bb4dfecd7fd6574d764b45d5f28c1ca73ed66
+  # Pin the current Core baseline used by the provider wheel and Redis/Ray matrix.
+  TRIBUTO_CORE_REPOSITORY: ${{ inputs.core_repository || 'Chang-Tong/Tributo' }}
+  TRIBUTO_CORE_REF: ${{ inputs.core_ref || '1eaae848ef7f6acbd600c87771f91f9291f00b3e' }}
 
 jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.broker_repository || github.repository }}
+          ref: ${{ inputs.broker_ref || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -23,22 +42,80 @@ jobs:
           repository: ${{ env.TRIBUTO_CORE_REPOSITORY }}
           ref: ${{ env.TRIBUTO_CORE_REF }}
           path: tributo-core
+      - name: Checkout verified algorithm Wheel fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: Chang-Tong/tributo-knova
+          ref: 847a77b01acf0c98eb5f1110361d3c81b98bdad1
+          path: runtime-fixtures
       - name: Build and install Core and provider
         run: |
           python -m pip install --upgrade pip
           python -m pip wheel --no-deps --wheel-dir dist/core ./tributo-core
-          python -m pip install dist/core/tributo-*.whl '.[dev]'
+          python -m pip install dist/core/tributo-*.whl runtime-fixtures/vendor/wheels/tributo_algorithms_boosting-0.1.0-py3-none-any.whl '.[dev,xgboost]'
       - name: Ruff format
-        run: ruff format --check .
+        run: ruff format --check src tests scripts
       - name: Ruff lint
-        run: ruff check .
+        run: ruff check src tests scripts
       - name: Mypy
-        run: mypy src tests/unit
+        # v2 has a separate dependency assembly and type-check below.
+        run: mypy src tests/unit --exclude 'src/tributo_broker_redis/profiles/' --follow-imports=silent --follow-untyped-imports
       - name: Suppression check
         run: ./scripts/check_suppressions.sh
       - name: Unit tests
-        run: python -m pytest -q tests/unit
+        run: python -m pytest -q tests/unit tests/test_driver_transport.py
       - name: Wheel entry-point discovery
         run: python -m pytest -q tests/integration/test_broker_redis_wheel.py -m integration
       - name: Wheel build
         run: python -m pip wheel --no-deps --wheel-dir dist .
+
+  aimodel-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.broker_repository || github.repository }}
+          ref: ${{ inputs.broker_ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Checkout the existing attested runtime Wheel fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: Chang-Tong/tributo-knova
+          ref: 847a77b01acf0c98eb5f1110361d3c81b98bdad1
+          path: runtime-fixtures
+      - name: Checkout current Tributo Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TRIBUTO_CORE_REPOSITORY }}
+          ref: ${{ env.TRIBUTO_CORE_REF }}
+          path: tributo-core
+      - name: Install runtime dependencies and this provider
+        # Only dependency Wheels are used. No KnoVa sources/package are installed.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            ./tributo-core \
+            runtime-fixtures/vendor/wheels/tributo_algorithms_boosting-0.1.0-py3-none-any.whl \
+            'ray-clickhouse>=1.0,<2' \
+            '.[dev,aimodel-v2]'
+      - name: Type-check the provider with the v2 dependency assembly
+        run: mypy src tests/unit --follow-imports=silent --follow-untyped-imports
+      - name: V2 protocol, mapping, and driver regressions
+        run: python -m pytest tests/aimodel_v2 tests/contracts -q
+      - name: Install isolated Redis test executable
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+      - name: Redis wire and lifecycle integration
+        env:
+          TRIBUTO_CONTRACT_REQUIRE_REDIS: '1'
+          TRIBUTO_CONTRACT_CAPTURE_DIR: artifacts/redis-fault-injections
+        run: python -m pytest tests/integration/test_aimodel_v2_redis.py -q --junitxml=artifacts/redis-contract.xml
+      - name: Preserve Redis protocol evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-contract-evidence
+          path: artifacts/

@@ -1,0 +1,25 @@
+{
+  "protocol_version": "2.0",
+  "contract_revision": 2,
+  "source_commit": "358ffc407439657131be5b71212fc8afa6973a73",
+  "source_directory": "训练推理引擎任务描述协议/protocol-v2-2606",
+  "documents": [
+    {
+      "path": "inference-protocol.md",
+      "sha256": "bea81ff90032a4aa2344ee1f8e3758a4483ad0a7038cbb4456623885e51ce48c"
+    },
+    {
+      "path": "protocol-conventions.md",
+      "sha256": "7b66e5895ea268d3035a9ef7c5b6148a872056bd85b9f11c708055b18c6b0f77"
+    },
+    {
+      "path": "training-protocol-appendix.md",
+      "sha256": "46f8f83b6f3029ef6d5ed6f600e96a8c199e7539d8a784d7265d18de924ce502"
+    },
+    {
+      "path": "training-protocol.md",
+      "sha256": "ba3cc32c6dce30a075827da1ad12d68c812d8e7d31abe768732bae9f3652b56e"
+    }
+  ],
+  "scope": "Curated structural and semantic contract suite; not a claim of complete implementation or appendix validation."
+}

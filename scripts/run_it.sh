@@ -56,7 +56,7 @@ test -n "$core_wheel"
 
 uv venv "$venv_dir"
 python_bin="$venv_dir/bin/python"
-uv pip install --python "$python_bin" "$core_wheel" "$wheel_path" pytest
+uv pip install --python "$python_bin" "$core_wheel" "${wheel_path}[xgboost]" pytest
 
 uv venv "$core_only_venv_dir"
 core_only_python="$core_only_venv_dir/bin/python"

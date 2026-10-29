@@ -25,11 +25,12 @@ def _resolve_secret(reference: str | None) -> str | None:
     if reference is None:
         return None
     if reference.startswith("env:"):
-        value = os.environ.get(reference.removeprefix("env:"))
+        name = reference.removeprefix("env:")
+        value = os.environ.get(name)
         if value:
             return value
         raise RedisCredentialUnavailable(
-            "Redis credential environment variable is unavailable"
+            f"Redis credential environment variable is unavailable: {name}"
         )
     if reference.startswith("mount:"):
         path = Path(reference.removeprefix("mount:"))

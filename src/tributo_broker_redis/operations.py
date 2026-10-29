@@ -27,6 +27,7 @@ class MappingFailure(Exception):
 class PreparedOperation:
     operation_payload: dict[str, Any]
     credential_ref: str | None
+    timeout_seconds: float | None = None
 
 
 def prepare_operation(request: GenericRequest) -> PreparedOperation:
@@ -40,36 +41,34 @@ def _prepare_training(request: GenericRequest) -> PreparedOperation:
     raw_algorithm = request.spec.get("algorithm")
     if raw_algorithm != "xgboost":
         raise MappingFailure(
-            "UNSUPPORTED_ALGORITHM", "v0.1 supports only the xgboost algorithm"
+            "UNSUPPORTED_ALGORITHM",
+            "generic training supports only the xgboost algorithm",
         )
     try:
         spec = TrainingSpec.model_validate(request.spec)
-        from tributo.training.xgboost_trainer import XGBoostTrainingConfig
+        from tributo_broker_redis.training import GenericTrainingConfig
 
-        config = XGBoostTrainingConfig.model_validate(spec.config)
+        config = GenericTrainingConfig.model_validate(spec.config)
     except ValidationError as exc:
         raise MappingFailure(
             "INVALID_TRAINING_REQUEST", "training request validation failed"
         ) from exc
-    if config.output.bundle_uri is None:
-        raise MappingFailure(
-            "UNSUPPORTED_TRAINING_OUTPUT", "training requires output.bundle_uri"
-        )
-    if request.execution_profile == "single_worker" and config.ray.num_workers != 1:
+    if request.execution_profile == "single_worker" and config.worker_count != 1:
         raise MappingFailure(
             "EXECUTION_PROFILE_MISMATCH",
-            "single_worker training requires ray.num_workers=1",
+            "single_worker training requires worker_count=1",
         )
-    if request.execution_profile == "distributed" and config.ray.num_workers < 2:
+    if request.execution_profile == "distributed" and config.worker_count < 2:
         raise MappingFailure(
             "EXECUTION_PROFILE_MISMATCH",
-            "distributed training requires ray.num_workers>=2",
+            "distributed training requires worker_count>=2",
         )
     return PreparedOperation(
         operation_payload={
             "training_config": config.model_dump(mode="json", exclude_unset=True)
         },
         credential_ref=spec.credential_ref,
+        timeout_seconds=config.training.max_training_time_seconds,
     )
 
 
@@ -78,7 +77,7 @@ def _prepare_batch_inference(request: GenericRequest) -> PreparedOperation:
     if raw_profile != "bundle-backed":
         raise MappingFailure(
             "UNSUPPORTED_INFERENCE_PROFILE",
-            "v0.1 supports only the bundle-backed inference profile",
+            "generic v1 supports only the bundle-backed inference profile",
         )
     try:
         spec = BatchInferenceSpec.model_validate(request.spec)
