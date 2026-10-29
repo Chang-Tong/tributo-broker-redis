@@ -156,3 +156,11 @@ backend/runtime 还会检查 COMPLETED 与原请求的租户、模型、版本�
 Provider CI 强制真实 redis-server，缺依赖会失败。`test_aimodel_v2_redis.py` 包括真实 Redis 错误注入并启动 CLI 子进程验证退出码，以及当前 Core `AlgorithmRunResult` / `InferenceResult` 经实际 Broker 适配与 Reporter 序列化后的检查。它们替代计算/模型运行，验证的是接口与序列化边界，不计作真实集群 ML 验收。
 
 接入实际流水线时，务必从 Redis 读取原始 entry（保留 entry_id、fields 和 payload 字符串），从仓库查询实际结果行。不要对捕获结果“修好字段”后再验证；缺证据直接失败。候选 artifact 的所有权及其生成真实性由生产该 artifact 的 CI job 保证。下游需将这个 job 设置为必需检查，才会阻止合并。
+
+## Provider CI 的开发验收要求
+
+GitHub runner 使用 Ubuntu / Python 3.12，安装固定 Core SHA、固定算法 Wheel 和 Broker 对应 extras；本地已有环境不能替代这次全新安装。开发工具版本在 pyproject.toml 固定为 Ruff 0.17.3、Mypy 2.4.1。`conftest` 显式归为本项目导入，避免不同 Ruff 版本的自动识别造成排序差异。
+
+unit job 依次要求 Ruff format、Ruff lint、Mypy、禁止源码忽略注释、generic 单元/transport 测试、Wheel 入口发现和 Wheel 构建全部通过。前一步失败会使后续步骤跳过，跳过不能算作通过。
+
+aimodel-v2 job 另要求完整 provider 类型检查、V2/契约回归和强制真实 Redis 门禁通过；Protocol contracts workflow 要求无 Core/Ray/Redis 环境中的独立检查器通过并导出证据。远端通过后再引用具体 run，不把本地静态检查描述为远端 CI 已成功。

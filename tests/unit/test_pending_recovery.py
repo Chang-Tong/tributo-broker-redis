@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from conftest import FakeRedis
 from tributo.ray_jobs import RayJobSubmission
 
+from conftest import FakeRedis
 from tributo_broker_redis.config import RedisBrokerConfig
 from tributo_broker_redis.consumer import RedisTaskConsumer
 from tributo_broker_redis.operations import PreparedOperation

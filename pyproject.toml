@@ -33,12 +33,12 @@ aimodel-v2 = [
     "tributo-algorithms-boosting>=0.1,<1",
 ]
 dev = [
-    "mypy>=1.14",
+    "mypy==2.4.1",
     "pytest>=8.0",
     "pytest-timeout>=2.3",
     "jsonschema>=4.23,<5",
     "types-jsonschema>=4.23",
-    "ruff>=0.6,<1.0",
+    "ruff==0.17.3",
 ]
 
 [project.entry-points."tributo.brokers"]
@@ -65,6 +65,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["conftest", "tributo_broker_redis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/contracts", "tests/aimodel_v2", "tests/integration"]

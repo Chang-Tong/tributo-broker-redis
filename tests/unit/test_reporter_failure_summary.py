@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import FakeRedis
 
+from conftest import FakeRedis
 from tributo_broker_redis.reporter import RedisEventReporter
 
 

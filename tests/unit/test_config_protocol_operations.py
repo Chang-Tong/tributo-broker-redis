@@ -6,12 +6,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from conftest import inference_request, training_config
 from pydantic import ValidationError
 from redis.exceptions import TimeoutError
 from tributo.integrations.broker import TaskDisposition
 from tributo.ray_jobs import RayJobSubmission
 
+from conftest import inference_request, training_config
 from tributo_broker_redis.cli import _parser, main
 from tributo_broker_redis.config import (
     OperationType,
