@@ -23,6 +23,7 @@ from tributo_broker_redis.cancellation import (
     ActiveSubmission,
     ActiveSubmissionMap,
     CancelWatcher,
+    TerminalEventMatcher,
     terminal_event_published,
 )
 from tributo_broker_redis.config import (
@@ -103,6 +104,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         recovery_driver_entrypoints: tuple[str, ...] = (),
         reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
         job_lister: Callable[[str], Iterable[Any]] = _list_ray_jobs,
+        terminal_event_matcher: TerminalEventMatcher | None = None,
     ) -> None:
         if not driver_entrypoint.strip():
             raise ValueError("driver_entrypoint must not be empty")
@@ -117,6 +119,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         }
         self._reporter_factory = reporter_factory
         self._job_lister = job_lister
+        self._terminal_event_matcher = terminal_event_matcher
         validate_execution_environment(config)
         self._redis = redis_client or create_redis_client(config)
         self._consumers: dict[OperationType, RedisTaskConsumer] = {
@@ -137,6 +140,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             max_event_bytes=config.transport.max_event_bytes,
             max_stream_length=config.transport.max_stream_length,
             reporter_factory=reporter_factory,
+            terminal_event_matcher=terminal_event_matcher,
         )
         self._next_channel = 0
         self._next_pending_recovery = 0.0
@@ -264,7 +268,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             )
             recovered = self.active_submissions.get(cast(str, operation_id))
             if recovered is not None and terminal_event_published(
-                self._redis, recovered
+                self._redis, recovered, self._terminal_event_matcher
             ):
                 self.active_submissions.remove(recovered.operation_id)
                 continue
@@ -306,7 +310,9 @@ class RedisBrokerRuntime(BrokerRuntime):
                     ),
                 ),
             )
-        if terminal_event_published(self._redis, existing):
+        if terminal_event_published(
+            self._redis, existing, self._terminal_event_matcher
+        ):
             logger.info(
                 "Recovered operation is already terminal: operation_id=%s "
                 "submission_id=%s ray_job_id=%s",
@@ -365,7 +371,7 @@ class RedisBrokerRuntime(BrokerRuntime):
         run_id: str,
         attempt_id: str,
         submission: RayJobSubmission | None = None,
-        received_at_ms: int | str | None = None,
+        received_at_ms: int | None = None,
     ) -> RedisEventReporter:
         channel = self.config.channels.for_operation(operation_type)
         return self._reporter_factory(
@@ -381,7 +387,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             outer_identity_field=channel.outer_identity_field,
             max_event_bytes=self.config.transport.max_event_bytes,
             max_stream_length=self.config.transport.max_stream_length,
-            received_at_ms=int(received_at_ms) if received_at_ms is not None else None,
+            received_at_ms=received_at_ms,
         )
 
     def _invalid(
@@ -414,7 +420,9 @@ class RedisBrokerRuntime(BrokerRuntime):
                 execution_profile=execution_profile,
                 run_id=run_id or operation_id,
                 attempt_id=attempt_id,
-                received_at_ms=message.metadata.get("received_at_ms"),
+                received_at_ms=_metadata_milliseconds(
+                    message.metadata, "received_at_ms"
+                ),
             ).publish(
                 "FAILED",
                 {
@@ -465,7 +473,9 @@ class RedisBrokerRuntime(BrokerRuntime):
                         execution_profile="single_worker",
                         run_id=outer_operation_id,
                         attempt_id="attempt-1",
-                        received_at_ms=message.metadata.get("received_at_ms"),
+                        received_at_ms=_metadata_milliseconds(
+                            message.metadata, "received_at_ms"
+                        ),
                     ).publish(
                         "CANCELLED",
                         {"reason": "cancelled before admission"},
@@ -555,7 +565,7 @@ class RedisBrokerRuntime(BrokerRuntime):
             execution_profile=request.execution_profile,
             run_id=run_id,
             attempt_id=request.attempt_id,
-            received_at_ms=message.metadata.get("received_at_ms"),
+            received_at_ms=_metadata_milliseconds(message.metadata, "received_at_ms"),
         )
         try:
             if bool(self._redis.exists(channel.cancel_key(request.operation_id))):

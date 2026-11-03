@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,9 +56,13 @@ class ActiveSubmissionMap:
             return self._items.get(operation_id)
 
 
+TerminalEventMatcher = Callable[[Mapping[str, Any], ActiveSubmission], bool]
+
+
 def terminal_event_published(
     redis_client: Any,
     item: ActiveSubmission,
+    matcher: TerminalEventMatcher | None = None,
 ) -> bool:
     """Find a recent terminal event even if a recovery event followed it."""
     xrevrange = getattr(redis_client, "xrevrange", None)
@@ -78,20 +82,11 @@ def terminal_event_published(
             submission_id = event.get("submission_id")
         except (json.JSONDecodeError, AttributeError):
             continue
-        if (
-            event_type in _TERMINAL_EVENT_TYPES
-            and submission_id == item.submission.submission_id
-        ):
+        if event_type not in _TERMINAL_EVENT_TYPES:
+            continue
+        if submission_id == item.submission.submission_id:
             return True
-        # KnoVa v2 uses an immutable job_id/execution_id and has no submission_id.
-        # Keep the generic protocol's strict attempt matching above intact.
-        if (
-            event_type in _TERMINAL_EVENT_TYPES
-            and submission_id is None
-            and event.get("protocol_version") == "2.0"
-            and item.channel.outer_identity_field in {"job_id", "execution_id"}
-            and event.get(item.channel.outer_identity_field) == item.operation_id
-        ):
+        if matcher is not None and matcher(event, item):
             return True
     return False
 
@@ -111,6 +106,7 @@ class CancelWatcher:
         status_getter: Callable[..., str] = get_ray_job_status,
         stopper: Callable[..., bool] = stop_ray_job,
         reporter_factory: Callable[..., RedisEventReporter] = RedisEventReporter,
+        terminal_event_matcher: TerminalEventMatcher | None = None,
     ) -> None:
         self._redis = redis_client
         self._active = active
@@ -121,6 +117,7 @@ class CancelWatcher:
         self._status_getter = status_getter
         self._stopper = stopper
         self._reporter_factory = reporter_factory
+        self._terminal_event_matcher = terminal_event_matcher
         self._stop_requested: set[str] = set()
         self._timeout_requested: set[str] = set()
         self._closed = threading.Event()
@@ -213,7 +210,7 @@ class CancelWatcher:
                 )
 
     def _terminal_event_published(self, item: ActiveSubmission) -> bool:
-        return terminal_event_published(self._redis, item)
+        return terminal_event_published(self._redis, item, self._terminal_event_matcher)
 
     def _report_cancelled(self, item: ActiveSubmission) -> None:
         reporter = self._reporter(item)
@@ -280,5 +277,6 @@ __all__ = [
     "ActiveSubmission",
     "ActiveSubmissionMap",
     "CancelWatcher",
+    "TerminalEventMatcher",
     "terminal_event_published",
 ]

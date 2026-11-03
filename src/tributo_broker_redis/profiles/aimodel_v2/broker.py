@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 
+from tributo_broker_redis.cancellation import ActiveSubmission
 from tributo_broker_redis.config import OperationType, RedisBrokerConfig
 from tributo_broker_redis.operations import MappingFailure, PreparedOperation
 from tributo_broker_redis.profiles.aimodel_v2.protocol import parse_request
@@ -83,6 +85,19 @@ def _timeout_seconds(
     return float(value)
 
 
+def _matches_knova_terminal_event(
+    event: Mapping[str, Any], submission: ActiveSubmission
+) -> bool:
+    """Match v2's immutable public identity without a Ray submission ID."""
+    identity_field = submission.channel.outer_identity_field
+    return (
+        event.get("protocol_version") == "2.0"
+        and event.get("submission_id") is None
+        and identity_field in {"job_id", "execution_id"}
+        and event.get(identity_field) == submission.operation_id
+    )
+
+
 def create_runtime(config: RedisBrokerConfig) -> RedisBrokerRuntime:
     """Build a v2 runtime without importing the deployment integration."""
     return RedisBrokerRuntime(
@@ -92,6 +107,7 @@ def create_runtime(config: RedisBrokerConfig) -> RedisBrokerRuntime:
         driver_entrypoint=DRIVER_ENTRYPOINT,
         recovery_driver_entrypoints=("python -m tributo_knova.execution_driver",),
         reporter_factory=KnovaRedisEventReporter,
+        terminal_event_matcher=_matches_knova_terminal_event,
     )
 
 

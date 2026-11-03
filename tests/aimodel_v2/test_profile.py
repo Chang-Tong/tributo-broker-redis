@@ -90,6 +90,7 @@ def test_public_plugin_selects_owned_v2_parser_driver_and_reporter(tmp_path, ent
     assert kwargs["operation_preparer"] is broker.prepare_broker_operation
     assert kwargs["driver_entrypoint"] == broker.DRIVER_ENTRYPOINT
     assert kwargs["reporter_factory"].__module__.startswith("tributo_broker_redis.")
+    assert kwargs["terminal_event_matcher"] is broker._matches_knova_terminal_event
     assert (
         "python -m tributo_knova.execution_driver"
         in kwargs["recovery_driver_entrypoints"]

@@ -16,6 +16,7 @@ from tributo_broker_redis.cancellation import (
     ActiveSubmission,
     ActiveSubmissionMap,
     CancelWatcher,
+    terminal_event_published,
 )
 from tributo_broker_redis.config import (
     OperationType,
@@ -1022,6 +1023,38 @@ def test_terminal_event_is_found_when_a_later_nonterminal_event_exists(
 
     assert active.get(item.operation_id) is None
     assert len(fake_redis.events[stream]) == event_count
+
+
+def test_terminal_event_matcher_is_opt_in(
+    config: RedisBrokerConfig, fake_redis: FakeRedis
+) -> None:
+    item = ActiveSubmission(
+        operation_id="external-operation",
+        operation_type="training",
+        execution_profile="distributed",
+        run_id="external-operation",
+        channel=config.channels.training,
+        submission=RayJobSubmission(
+            run_id="external-operation",
+            attempt_id="attempt-1",
+            submission_id="ray-submission",
+        ),
+    )
+    fake_redis.xadd(
+        item.channel.event_stream_key(item.operation_id),
+        {
+            "payload": json.dumps(
+                {"event_type": "COMPLETED", "external_id": item.operation_id}
+            )
+        },
+    )
+
+    assert not terminal_event_published(fake_redis, item)
+    assert terminal_event_published(
+        fake_redis,
+        item,
+        lambda event, active: event.get("external_id") == active.operation_id,
+    )
 
 
 @pytest.mark.parametrize("status", ["RUNNING", "FAILED", "STOPPED", "SUCCEEDED"])
