@@ -45,7 +45,7 @@ jobs:
       - name: Checkout verified algorithm Wheel fixtures
         uses: actions/checkout@v4
         with:
-          repository: Chang-Tong/tributo-knova
+          repository: Chang-Tong/tributo-integration
           ref: 847a77b01acf0c98eb5f1110361d3c81b98bdad1
           path: runtime-fixtures
       - name: Build and install Core and provider
@@ -82,7 +82,7 @@ jobs:
       - name: Checkout the existing attested runtime Wheel fixtures
         uses: actions/checkout@v4
         with:
-          repository: Chang-Tong/tributo-knova
+          repository: Chang-Tong/tributo-integration
           ref: 847a77b01acf0c98eb5f1110361d3c81b98bdad1
           path: runtime-fixtures
       - name: Checkout current Tributo Core
