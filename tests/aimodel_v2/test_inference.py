@@ -800,6 +800,13 @@ def test_stable_result_batch_keeps_nullable_columns_consistent() -> None:
         }
     )
 
+    for tz in ("UTC", "Asia/Shanghai"):
+        stamp = inference._stable_result_batch(populated, timezone=tz)["inferred_at"]
+        assert stamp.type.tz == tz
+        assert (
+            stamp[0].as_py().timestamp()
+            == pd.Timestamp("2026-09-21T00:00:00Z").timestamp()
+        )
     assert inference._stable_result_batch(all_null).schema == (
         inference._stable_result_batch(populated).schema
     )
@@ -1066,6 +1073,7 @@ def test_multiclass_and_regression_shap_match_native_margin_and_feature_order(
 def test_bound_sink_delegates_to_tributo_write_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(inference, "_output_timestamp_timezone", lambda _target: None)
     _core, sink, _credentials = inference._build_request(_request())
     calls: list[tuple[str, dict[str, Any]]] = []
     writes: list[tuple[Any, Any]] = []
@@ -1110,6 +1118,7 @@ def test_bound_sink_delegates_to_tributo_write_gateway(
 def test_all_filtered_results_succeed_without_sending_an_untyped_empty_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(inference, "_output_timestamp_timezone", lambda _target: None)
     payload = _request().model_dump(mode="python")
     payload["output"]["result_filter"] = {"mode": "INCLUDE", "labels": ["churn"]}
     _core, sink, _credentials = inference._build_request(
@@ -1139,6 +1148,7 @@ def test_all_filtered_results_succeed_without_sending_an_untyped_empty_write(
 def test_tree_shap_sink_releases_predictor_actors_before_attribution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(inference, "_output_timestamp_timezone", lambda _target: None)
     payload = _request().model_dump(mode="python")
     payload["extensions"] = {"explanation": {"enabled": True, "method": "TREE_SHAP"}}
     _core, sink, _credentials = inference._build_request(
@@ -1621,3 +1631,71 @@ def test_native_artifact_uses_verified_schema_sidecar_when_booster_omits_names(
     with pytest.raises(inference._InferenceConfigurationError) as error:
         inference._prepare_model(core, sink, req)
     assert error.value.code == "MODEL_ARTIFACT_CORRUPTED"
+
+
+def test_legacy_native_input_binds_null_filter_and_declared_projection() -> None:
+    payload = _request().model_dump()
+    inputs = payload["input"]
+    del inputs["query"]
+    inputs["features"][0]["display_name"] = ""
+    properties = inputs["datasource"]["properties"]
+    properties.update(
+        native_table="analytics.features",
+        native_columns='["user_id","spend","active_days"]',
+        native_filter="user_id IS NOT NULL",
+    )
+    core, _, _ = inference._build_request(
+        InferenceExecutionRequest.model_validate(payload)
+    )
+    assert core.input.transforms.steps[0].model_dump() == {
+        "type": "filter_not_null",
+        "column": "user_id",
+    }
+    for field, bad in (
+        ("native_filter", "user_id IS NOT NULL OR 1=1"),
+        ("native_table", "elsewhere.features"),
+        ("native_columns", '["spend","active_days"]'),
+    ):
+        original = properties[field]
+        properties[field] = bad
+        with pytest.raises(ValueError, match=field):
+            inference._build_request(InferenceExecutionRequest.model_validate(payload))
+        properties[field] = original
+
+
+def test_legacy_sql_binds_numeric_filter_outside_projection() -> None:
+    payload = _request().model_dump()
+    inputs = payload["input"]
+    for column in [inputs["entity_key"], *inputs["features"]]:
+        column["result_column"] = column["origin"]["column_name"]
+    inputs["query"] = {
+        "sql": (
+            "SELECT user_id, spend, active_days FROM analytics.features "
+            "WHERE label >= {minimum:Int32}"
+        ),
+        "params": {"minimum": 0},
+    }
+    core, _, _ = inference._build_request(
+        InferenceExecutionRequest.model_validate(payload)
+    )
+    assert core.input.source.options["columns"] == [
+        "user_id",
+        "spend",
+        "active_days",
+        "label",
+    ]
+    assert core.input.transforms.steps[0].model_dump() == {
+        "type": "filter_comparison",
+        "column": "label",
+        "operator": "gte",
+        "value": 0,
+    }
+
+
+def test_sql_qualifier_requires_a_declared_from_alias() -> None:
+    inputs = _request().model_dump()["input"]
+    inputs["query"]["sql"] = inputs["query"]["sql"].replace(
+        "features t0 WHERE", "features WHERE"
+    )
+    with pytest.raises(ValueError, match="WHERE|qualifier"):
+        inference._input_layout(inputs)

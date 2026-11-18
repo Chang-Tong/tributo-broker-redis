@@ -15,12 +15,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, ClassVar, Literal, NoReturn, cast
+from urllib.parse import urlsplit
 
 from tributo.data import (
     DataWriteTargetRequest,
     FilterComparison,
     FilterEq,
     FilterNotEq,
+    FilterNotNull,
     IngestionRequest,
     Limit,
     ProviderSourceConfig,
@@ -57,7 +59,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FROM = re.compile(
     r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)"
-    r"(?:\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*))?",
+    r"(?:\s+(?:AS\s+)?((?!(?:WHERE|LIMIT)\b)[A-Za-z_][A-Za-z0-9_]*))?",
     re.IGNORECASE,
 )
 _WHERE = re.compile(
@@ -790,28 +792,62 @@ def _input_layout(
     entity_column = _identifier(
         entity_origin.get("column_name"), "input.entity_key.origin.column_name"
     )
-    transforms = _query_transforms(
-        input_value.get("query"),
-        table=f"{database}.{table_name}",
-        alias=alias,
-    )
-    _validate_projection(
-        _mapping(input_value.get("query"), "input.query"),
-        table=f"{database}.{table_name}",
-        alias=alias,
-        expected={
-            entity_column: _text(
-                entity.get("result_column"), "input.entity_key.result_column"
-            ),
-            **dict(zip(features, result_names, strict=True)),
-        },
-    )
+    qualified = f"{database}.{table_name}"
+    expected = {
+        entity_column: _text(
+            entity.get("result_column"), "input.entity_key.result_column"
+        ),
+        **dict(zip(features, result_names, strict=True)),
+    }
+    if input_value.get("query") is None:
+        datasource = _mapping(input_value.get("datasource"), "input.datasource")
+        properties = _mapping(
+            datasource.get("properties"), "input.datasource.properties"
+        )
+        if (
+            properties.get("native_table") not in (qualified, table_name)
+            or datasource.get("database_name") != database
+        ):
+            _invalid("native_table must match the declared PRIMARY table")
+        columns = properties.get("native_columns")
+        if isinstance(columns, str):
+            try:
+                columns = json.loads(columns)
+            except ValueError:
+                _invalid("native_columns must be a JSON array")
+        if (
+            not isinstance(columns, list)
+            or not all(isinstance(c, str) for c in columns)
+            or len(columns) != len(expected)
+            or set(columns) != set(expected)
+        ):
+            _invalid(
+                "native_columns must match the declared entity and feature columns"
+            )
+        predicate = properties.get("native_filter")
+        steps: tuple[FilterNotNull, ...] = ()
+        if predicate not in (None, ""):
+            condition = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s+IS\s+NOT\s+NULL",
+                str(predicate).strip(),
+                re.I,
+            )
+            if condition is None:
+                _invalid("native_filter supports a column IS NOT NULL predicate")
+            steps = (FilterNotNull(column=condition.group(1)),)
+        pipeline = TransformPipeline(steps=steps)
+    else:
+        query = _mapping(input_value.get("query"), "input.query")
+        pipeline = TransformPipeline(
+            steps=_query_transforms(query, table=qualified, alias=alias)
+        )
+        _validate_projection(query, table=qualified, alias=alias, expected=expected)
     return (
         f"{database}.{table_name}",
         entity_column,
         tuple(features),
         tuple(result_names),
-        TransformPipeline(steps=transforms),
+        pipeline,
     )
 
 
@@ -858,7 +894,7 @@ def _query_transforms(
             match = _PREDICATE.fullmatch(condition)
             condition_alias = None if match is None else match.group(1)
             if match is None or (
-                condition_alias is not None and condition_alias != alias
+                condition_alias is not None and condition_alias != sql_alias
             ):
                 _invalid("input.query WHERE supports only parameterized scalar filters")
             parameter = match.group(4)
@@ -943,8 +979,9 @@ def _validate_projection(
     match = re.fullmatch(
         r"SELECT\s+(.+?)\s+FROM\s+"
         + re.escape(table)
-        + r"\s+(?:AS\s+)?"
+        + r"(?:\s+(?:AS\s+)?("
         + re.escape(alias)
+        + r"))?"
         + r"(?:\s+WHERE\s+.+?)?(?:\s+LIMIT\s+\d+)?",
         sql,
         re.I | re.S,
@@ -954,7 +991,7 @@ def _validate_projection(
     projections: dict[str, str] = {}
     for item in match.group(1).split(","):
         projection = re.fullmatch(
-            r"\s*(?:([A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*",
+            r"\s*(?:([A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)(?:\s+AS\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)))?\s*",
             item,
             re.I,
         )
@@ -964,9 +1001,9 @@ def _validate_projection(
                 "result_column aliases"
             )
         qualifier, column, quoted, plain = projection.groups()
-        if qualifier is not None and qualifier != alias:
+        if qualifier is not None and qualifier != match.group(2):
             _invalid("input.query SELECT qualifier must match the declared table alias")
-        result = quoted or plain
+        result = quoted or plain or column
         if column in projections or result in projections.values():
             _invalid("input.query SELECT aliases must be unique")
         projections[column] = result
@@ -1172,7 +1209,9 @@ def _build_request(
                 *(
                     step.column
                     for step in transforms.steps
-                    if isinstance(step, (FilterEq, FilterNotEq, FilterComparison))
+                    if isinstance(
+                        step, (FilterEq, FilterNotEq, FilterComparison, FilterNotNull)
+                    )
                 ),
             )
         )
@@ -1436,6 +1475,10 @@ def _measure_input_rows(
     for index, step in enumerate(request.input.transforms.steps):
         if isinstance(step, Limit):
             row_limit = step.count
+            continue
+        if isinstance(step, FilterNotNull):
+            column = _identifier(step.column, "native filter column")
+            clauses.append(f"`{column}` IS NOT NULL")
             continue
         name = f"filter_{index}"
         if not isinstance(step, (FilterEq, FilterNotEq, FilterComparison)):
@@ -1836,10 +1879,7 @@ def _protocol_batch(
             "model_id": str(model.get("model_id") or ""),
             "version_id": str(model.get("version_id") or ""),
             "tenant_id": str(task.get("tenant_id") or ""),
-            # KnoVa's result table declares ClickHouse DateTime without a
-            # timezone. Preserve the UTC instant but emit a timezone-naive
-            # Arrow timestamp so the official ClickHouse binding can validate
-            # and write the column losslessly.
+            # The Arrow mapping below applies the destination column timezone.
             "inferred_at": datetime.now(UTC).replace(tzinfo=None),
         }
     )
@@ -1858,7 +1898,34 @@ def _protocol_batch(
     return result
 
 
-def _stable_result_batch(frame: Any) -> Any:
+def _output_timestamp_timezone(target: DataWriteTargetRequest) -> str | None:
+    """Read the destination column type without reading any result rows."""
+    import clickhouse_connect
+    from clickhouse_connect.datatypes.registry import get_from_name
+    from clickhouse_connect.datatypes.temporal import DateTime, DateTime64
+
+    location = urlsplit(target.target)
+    database, table = location.path.strip("/").split("/")
+    password_env = target.runtime_options["credential_ref"].removeprefix("env://")
+    with clickhouse_connect.get_client(
+        host=location.hostname,
+        port=location.port,
+        database=database,
+        username=target.runtime_options["user"],
+        password=os.environ[password_env],
+    ) as client:
+        table = _identifier(table, "output table")
+        fields = client.query(f"DESCRIBE TABLE `{table}`").result_rows
+        declared = next((row[1] for row in fields if row[0] == "inferred_at"), None)
+        if declared is None:
+            _invalid("output table is missing inferred_at")
+        column = get_from_name(declared)
+    if not isinstance(column, (DateTime, DateTime64)):
+        _invalid("output.inferred_at must be DateTime or DateTime64")
+    return str(column.tzinfo) if column.tzinfo is not None else None
+
+
+def _stable_result_batch(frame: Any, *, timezone: str | None = None) -> Any:
     """Emit the one Arrow schema accepted by the ClickHouse result writer.
 
     Ray can split one ClickHouse read into many small blocks.  Without this
@@ -1883,9 +1950,15 @@ def _stable_result_batch(frame: Any) -> Any:
             pa.field("model_id", pa.string(), nullable=False),
             pa.field("version_id", pa.string(), nullable=False),
             pa.field("tenant_id", pa.string(), nullable=False),
-            pa.field("inferred_at", pa.timestamp("us"), nullable=False),
+            pa.field("inferred_at", pa.timestamp("us", tz=timezone), nullable=False),
         )
     )
+    if timezone is not None:
+        frame = frame.assign(
+            inferred_at=frame["inferred_at"]
+            .dt.tz_localize("UTC")
+            .dt.tz_convert(timezone)
+        )
     return pa.Table.from_pandas(
         frame.loc[:, list(_RESULT_COLUMNS)],
         schema=schema,
@@ -2060,6 +2133,7 @@ class _ClickHouseResultSink:
             transformed = transformed.map_batches(
                 _stable_result_batch,
                 batch_format="pandas",
+                fn_kwargs={"timezone": _output_timestamp_timezone(self._target)},
             )
             transformed = transformed.materialize()
         except Exception as exc:

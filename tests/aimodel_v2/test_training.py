@@ -1647,3 +1647,36 @@ def test_lazy_source_failure_remains_data_query_error_after_training_starts(
     assert caught.value.code == "DATA_QUERY_FAILED"
     assert caught.value.phase == "LOADING_DATA"
     assert _SECRET not in "".join(format_exception(caught.value))
+
+
+def test_shared_bundle_keeps_mount_alias_and_rejects_escape(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    bundle = storage / "tenant" / "job" / "bundle-1"
+    bundle.mkdir(parents=True)
+    mount = tmp_path / "mount"
+    mount.symlink_to(storage, target_is_directory=True)
+    request = _request(
+        storage_context={"type": "nas", "bucket": str(mount), "prefix": "tenant/job/"}
+    )
+    result = training._artifact_storage(request, str(bundle))
+    assert result["bucket"] == str(mount)
+    assert result["prefix"] == "tenant/job/bundle-1/"
+    escape = bundle.parent / "escape"
+    escape.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(training._TrainingExecutionError, match="outside"):
+        training._artifact_storage(request, str(escape / "foreign"))
+
+
+def test_wildcard_reads_only_declared_training_columns() -> None:
+    payload = _request().model_dump(mode="python")
+    for item in [*payload["features"], payload["target"]]:
+        item["result_column"] = item["origin"]["column_name"]
+    columns = tuple(training._column_mapping(payload))
+    payload["data_query"]["query"] = {
+        "sql": "SELECT * FROM analytics.churn_training_features"
+    }
+    table, _ = training._native_clickhouse_read(payload, {}, columns)
+    assert table == "analytics.churn_training_features"
+    payload["features"][0]["result_column"] = "unprojected_alias"
+    with pytest.raises(ValueError, match="columns do not match"):
+        training._native_clickhouse_read(payload, {}, columns)
