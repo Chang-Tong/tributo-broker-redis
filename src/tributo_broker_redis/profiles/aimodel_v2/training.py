@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from traceback import format_list, walk_tb
 from typing import Any, Literal, NoReturn, cast
 from urllib.parse import urlsplit
@@ -1110,10 +1111,18 @@ def _native_clickhouse_read(
         and table_alias != declared_alias
     ):
         _invalid("data_query alias does not match its source table")
-    if _projection_columns(match.group(1), table_alias=table_alias) != _column_mapping(
-        payload
-    ):
-        _invalid("data_query columns do not match the requested features and target")
+    columns = _column_mapping(payload)
+    projection = match.group(1).strip()
+    if projection == "*":
+        # A wildcard yields physical column names. The reader projects only the
+        # declared inputs, leaving unrelated table columns out of the model.
+        projected = {name: name for name in required_columns}
+    else:
+        projected = _projection_columns(projection, table_alias=table_alias)
+    if projected != columns:
+        _invalid(
+            "data_query plain columns do not match the requested features and target"
+        )
 
     steps: list[FilterEq | FilterNotEq | FilterComparison | Limit | SelectColumns] = []
     consumed_params: set[str] = set()
@@ -1321,23 +1330,25 @@ def _artifact_storage(
         }
 
     if requested_type in _SHARED_STORAGE_TYPES:
-        root = posixpath.normpath(requested_bucket)
-        requested_root = posixpath.join(root, requested_prefix)
-        bundle_path = posixpath.normpath(canonical_uri)
-        try:
-            contained = posixpath.commonpath([requested_root, bundle_path])
-        except ValueError as exc:
-            raise _TrainingExecutionError(
-                "published Bundle is outside the requested shared storage"
-            ) from exc
-        if contained != requested_root or bundle_path == requested_root:
+        root = Path(requested_bucket)
+        resolved_root = root.resolve()
+        requested_dir = (root / requested_prefix).resolve()
+        bundle = Path(canonical_uri)
+        bundle_path = bundle.resolve()
+        if (
+            not bundle.is_absolute()
+            or not requested_dir.is_relative_to(resolved_root)
+            or not bundle_path.is_relative_to(requested_dir)
+            or bundle_path == requested_dir
+        ):
             raise _TrainingExecutionError(
                 "published Bundle is outside the requested shared storage"
             )
+        relative = bundle_path.relative_to(requested_dir)
         return {
             "type": "nas",
-            "bucket": root,
-            "prefix": f"{posixpath.relpath(bundle_path, root).strip('/')}/",
+            "bucket": str(root),
+            "prefix": f"{requested_prefix}/{relative.as_posix()}/",
             "properties": properties,
         }
 

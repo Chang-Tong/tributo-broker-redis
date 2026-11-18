@@ -136,7 +136,9 @@ def _column(value: object, aliases: set[str], field: str) -> str:
     return _text(obj.get("result_column"), field + ".result_column")
 
 
-def _features(value: object, aliases: set[str], field: str = "features") -> set[str]:
+def _features(
+    value: object, aliases: set[str], field: str = "features", *, native: bool = False
+) -> set[str]:
     if not isinstance(value, list) or not value:
         _fail(field, "must be a non-empty array")
     ids, columns = set(), set()
@@ -148,7 +150,8 @@ def _features(value: object, aliases: set[str], field: str = "features") -> set[
             _fail(field, "feature_id and result_column must each be unique")
         ids.add(feature_id)
         columns.add(column)
-        _text(feature.get("display_name"), field + "[].display_name")
+        if not (native and feature.get("display_name") == ""):
+            _text(feature.get("display_name"), field + "[].display_name")
         _enum(
             feature.get("feature_role"),
             {"REGULAR", "TEMPORAL_KEY", "KNOWN_FUTURE"},
@@ -172,13 +175,27 @@ def _label_mapping(value: object, field: str) -> Mapping[str, int]:
     return mapping
 
 
-def _query(value: object, field: str) -> None:
+def _query(value: object, field: str, *, numeric_bindings: bool = False) -> None:
     query = _obj(value, field)
     sql = _text(query.get("sql"), field + ".sql")
     raw_params = query.get("params")
     params = _obj({} if raw_params is None else raw_params, field + ".params")
-    if any(not isinstance(v, str) for v in params.values()):
-        _fail(field + ".params", "values must be strings")
+    for key, bound in params.items():
+        if isinstance(bound, str):
+            continue
+        # Older ClickHouse requests serialized typed numeric bindings as JSON numbers.
+        types = re.findall(r"\{" + re.escape(key) + r":([^{}]+)\}", sql)
+        if (
+            numeric_bindings
+            and type(bound) in (int, float)
+            and types
+            and all(
+                re.fullmatch(r"U?Int(?:8|16|32|64)|Float64", sql_type)
+                for sql_type in types
+            )
+        ):
+            continue
+        _fail(field + ".params", "values must be strings or typed numeric bindings")
     required = set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*):[^{}]+\}", sql))
     if not required <= set(params):
         _fail(field + ".params", "must provide every named SQL parameter")
@@ -519,11 +536,22 @@ def validate_inference_payload(payload: Mapping[str, Any]) -> None:
     _label_mapping(model.get("label_mapping"), "model.label_mapping")
     _artifact_manifest(model)
     inputs = _obj(payload.get("input"), "input")
-    _datasource(inputs.get("datasource"), "input.datasource")
+    datasource = _obj(inputs.get("datasource"), "input.datasource")
+    _datasource(datasource, "input.datasource")
+    properties = datasource.get("properties") or {}
+    legacy_clickhouse = (
+        payload.get("protocol_version") == "2.0" and datasource["type"] == "CLICKHOUSE"
+    )
+    native = (
+        legacy_clickhouse
+        and inputs.get("query") is None
+        and bool(properties.get("native_table"))
+    )
     aliases = _topology(inputs, "input.")
-    _features(inputs.get("features"), aliases, "input.features")
+    _features(inputs.get("features"), aliases, "input.features", native=native)
     _column(inputs.get("entity_key"), aliases, "input.entity_key")
-    _query(inputs.get("query"), "input.query")
+    if not native:
+        _query(inputs.get("query"), "input.query", numeric_bindings=legacy_clickhouse)
     if inputs.get("expected_total_rows") is not None:
         _int(inputs["expected_total_rows"], "input.expected_total_rows", 0)
     output = _obj(payload.get("output"), "output")
